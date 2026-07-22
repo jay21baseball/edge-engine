@@ -213,6 +213,24 @@ class Engine:
 
         return self._apply_discipline(sorted(signals, key=lambda s: -s.score))
 
+    def _odds_due(self, every_minutes: float) -> bool:
+        """Wall-clock gate, so the throttle survives ephemeral cloud runs.
+
+        In `watch` the process is long-lived and an in-memory timer works. Under
+        GitHub Actions every scan is a FRESH process, so an in-memory timer
+        resets each pass and would fetch odds every single run - 5,760/month
+        against a 500 free-tier allowance, killing the key in under three days.
+
+        Anchoring to UTC wall-clock instead makes the decision identical whether
+        the process has been alive for a week or four seconds.
+        """
+        if every_minutes <= 0:
+            return True
+        now = datetime.now(timezone.utc)
+        minute_of_day = now.hour * 60 + now.minute
+        window = float(self.config.get("scan_interval_seconds", 300)) / 60.0
+        return (minute_of_day % every_minutes) < max(window, 1.0)
+
     def _odds_events(self) -> list:
         """Sharp lines, throttled to fit the odds-API quota.
 
@@ -230,6 +248,11 @@ class Engine:
         if not self.odds.enabled:
             return []
         every = float(self.config.get("odds_refresh_minutes", 180))
+
+        if not self._odds_due(every):
+            log.debug("odds not due this pass (refresh every %.0f min)", every)
+            return self._odds_cache
+
         elapsed = (time.monotonic() - self._odds_fetched_at) / 60.0
         if self._odds_cache and elapsed < every:
             log.debug("reusing odds from %.0f min ago", elapsed)
