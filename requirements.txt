@@ -1,0 +1,10 @@
+# Runtime dependencies.
+#
+# The engine deliberately uses only the standard library for HTTP and data
+# handling - no requests, no pandas. These two are the whole dependency
+# surface, which is what keeps "it cannot place an order" easy to verify.
+PyYAML>=6.0
+psycopg[binary]>=3.1
+
+# Tests only (harmless in the cloud runner, and lets CI run the suite).
+pytest>=8.0

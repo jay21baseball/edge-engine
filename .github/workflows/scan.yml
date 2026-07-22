@@ -39,10 +39,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # `cache: pip` needs a dependency file to key on. Without
+          # requirements.txt present it fails the job outright rather than
+          # skipping the cache.
           cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install
-        run: pip install --quiet pyyaml "psycopg[binary]"
+        run: pip install --quiet -r requirements.txt
 
       - name: Decide command
         id: pick
