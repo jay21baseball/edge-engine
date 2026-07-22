@@ -64,9 +64,15 @@ telegram_chat_id: null
 # (~$30/mo for 20k requests, which allows a 15-minute refresh). Start free,
 # see whether the slow signals are real, and only then decide if it earns $30.
 odds_refresh_minutes: 180
+
+# Pick sports that are IN SEASON — an out-of-season league returns no events
+# and silently wastes a request. Run `scan sports` to see what is live now and
+# what your current selection projects in monthly quota.
+#
+# July: MLB and MLS are the dense daily slates. Swap to NFL/NBA in autumn.
 odds_sports:
-  - basketball_nba
-  - americanfootball_nfl
+  - baseball_mlb
+  - soccer_usa_mls
 
 # ---------------------------------------------------------------- storage
 # Leave null for local SQLite. Set to a Supabase connection string (or supply
