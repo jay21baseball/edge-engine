@@ -132,6 +132,7 @@ class Engine:
         self._book_cache: dict[str, OrderBook] = {}
         self._odds_cache: list = []
         self._odds_fetched_at: float = -1e9
+        self._last_scan_at: Optional[float] = None
 
     # ------------------------------------------------------------- ingestion
 
@@ -189,6 +190,7 @@ class Engine:
 
     def scan_once(self) -> list[Signal]:
         self._book_cache.clear()
+        self._last_scan_at = time.monotonic()
         events = self.fetch_events()
         if not events:
             log.warning("no events ingested - skipping scan rather than "
@@ -431,6 +433,46 @@ class Engine:
         return {"scores": scores, "positions": positions_by_wallet,
                 "qualified": qualified, "market_makers": mm}
 
+    # ------------------------------------------------------------ bot support
+
+    def has_bankroll(self, chat_id: str) -> bool:
+        return self.store.get_state(chat_id, "bankroll") is not None
+
+    def set_bankroll(self, chat_id: str, amount: float) -> None:
+        """Resize everything from one number, and persist it per chat."""
+        self.store.set_state(chat_id, "bankroll", amount)
+        self.bankroll.bankroll = amount
+        self.state.config = self.bankroll
+        if self.state.current_bankroll <= 0:
+            self.state.current_bankroll = amount
+        if self.state.week_start_bankroll <= 0:
+            self.state.week_start_bankroll = amount
+
+    def load_bankroll(self, chat_id: str) -> None:
+        stored = self.store.get_state(chat_id, "bankroll")
+        if stored:
+            self.set_bankroll(chat_id, float(stored))
+
+    def minutes_since_scan(self) -> Optional[float]:
+        if self._last_scan_at is None:
+            return None
+        return (time.monotonic() - self._last_scan_at) / 60.0
+
+    def remember_briefing(self, chat_id: str, rows: list[dict], window) -> None:
+        """Map the numbers shown in a briefing back to signal ids.
+
+        Without this, '/took 1' has nothing to point at. The order must match
+        exactly what build_briefing rendered, so the same filter and sort are
+        applied here.
+        """
+        eligible = [
+            r for r in rows
+            if (r.get("days_to_resolution") or 0) <= window.max_days
+        ]
+        eligible.sort(key=lambda r: -(r.get("score") or 0))
+        ids = [r["id"] for r in eligible[: window.max_plays] if r.get("id")]
+        self.store.set_state(chat_id, "briefing_ids", ids)
+
     # --------------------------------------------------------------- reports
 
     def calibration_verdict(self) -> str:
@@ -444,7 +486,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="edge-engine")
     parser.add_argument("command",
                         choices=["scan", "watch", "wallets", "status", "sports",
-                                 "signals"])
+                                 "signals", "bot"])
     parser.add_argument("--all", action="store_true",
                         help="sports: include out-of-season leagues")
     parser.add_argument("--config", default="config.yaml")
@@ -467,6 +509,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             mark = "ON " if engine.bankroll.strategy_enabled(name) else "OFF"
             print(f"  [{mark}] {name:<22} (needs ${gate:,.0f})")
         print(f"\nstored rows: {engine.store.counts()}")
+        return 0
+
+    if args.command == "bot":
+        from .bot.listener import TelegramBot
+        token = engine.config.get("telegram_bot_token")
+        chat_id = engine.config.get("telegram_chat_id")
+        if not token:
+            print("No TELEGRAM_BOT_TOKEN set. Run setup_telegram first.")
+            return 1
+        if chat_id:
+            engine.load_bankroll(str(chat_id))
+        TelegramBot(engine, token, allowed_chat_id=chat_id).run()
         return 0
 
     if args.command == "signals":

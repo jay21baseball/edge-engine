@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS journal (
     FOREIGN KEY (signal_id) REFERENCES signals(id)
 );
 
+CREATE TABLE IF NOT EXISTS bot_state (
+    chat_id TEXT, key TEXT, value TEXT, updated TEXT,
+    PRIMARY KEY (chat_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS cross_venue_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT, kalshi_id TEXT, poly_id TEXT, title TEXT,
@@ -250,13 +255,85 @@ class SqliteStore:
             ).fetchone()
         return row[0] if row and row[0] is not None else None
 
+    # ------------------------------------------------------------ bot state
+
+    def set_state(self, chat_id: str, key: str, value) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO bot_state (chat_id, key, value, updated)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(chat_id, key) DO UPDATE SET
+                       value=excluded.value, updated=excluded.updated""",
+                (str(chat_id), key, json.dumps(value),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+
+    def get_state(self, chat_id: str, key: str, default=None):
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM bot_state WHERE chat_id=? AND key=?",
+                (str(chat_id), key),
+            ).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return default
+
+    def signal_by_id(self, signal_id: int) -> Optional[dict]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT s.*, j.taken, j.outcome, j.actual_entry, j.pnl
+                   FROM signals s LEFT JOIN journal j ON j.signal_id = s.id
+                   WHERE s.id = ?""",
+                (signal_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_decision(self, signal_id: int, taken: bool,
+                        actual_entry: Optional[float] = None,
+                        stake: Optional[float] = None,
+                        notes: str = "") -> None:
+        """Log whether the operator acted.
+
+        Logging PASSES matters as much as logging takes: it is the only way to
+        separate "the model is bad" from "the model is fine and I am not
+        executing it" - opposite problems with opposite fixes.
+        """
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO journal (signal_id, alerted_ts, taken,
+                       actual_entry, stake, notes)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(signal_id) DO UPDATE SET
+                       taken=excluded.taken,
+                       actual_entry=COALESCE(excluded.actual_entry, journal.actual_entry),
+                       stake=COALESCE(excluded.stake, journal.stake),
+                       notes=excluded.notes""",
+                (signal_id, datetime.now(timezone.utc).isoformat(), int(taken),
+                 actual_entry, stake, notes),
+            )
+
+    def scorecard(self) -> dict:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT
+                     COUNT(*)                                   AS alerted,
+                     SUM(CASE WHEN taken=1 THEN 1 ELSE 0 END)   AS taken,
+                     SUM(CASE WHEN taken=0 THEN 1 ELSE 0 END)   AS passed,
+                     SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
+                     COALESCE(SUM(pnl), 0)                      AS pnl
+                   FROM journal"""
+            ).fetchone()
+        return dict(row) if row else {}
+
     def recent_signals(self, limit: int = 25) -> list[dict]:
+        """Full rows. The bot rehydrates Signal objects from these and maps
+        briefing positions back to ids, so every column must be present."""
         with self.connect() as conn:
             rows = conn.execute(
-                """SELECT strategy, venue, title, side, entry_price, edge,
-                          confidence, days_to_resolution, stake, contracts,
-                          deterministic, rationale, counter_case, ts
-                   FROM signals ORDER BY ts DESC, score DESC LIMIT ?""",
+                "SELECT * FROM signals ORDER BY ts DESC, score DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]

@@ -347,11 +347,18 @@ class WalletAttentionQueue(Strategy):
                     "edge_remaining_pct": round(remaining * 100, 1),
                 },
                 counter_case=(
-                    f"You would enter at {current:.2f} vs their {avg_entry:.2f} - "
-                    f"{captured * 100:.0f}% of the move is already gone. You cannot "
-                    f"see their other leg: this position may be hedged on Kalshi, in "
-                    f"a sportsbook, or against an equity. Attention prompt only - "
-                    f"form your own view before acting."
+                    (f"The price has moved AGAINST them since they entered "
+                     f"({avg_entry:.2f} then, {current:.2f} now). You get a "
+                     f"better price than they did - but ask why it moved. They "
+                     f"may simply be wrong, or holding through news you have "
+                     f"not seen."
+                     if captured <= 0.0 else
+                     f"You would enter at {current:.2f} vs their "
+                     f"{avg_entry:.2f} - {captured * 100:.0f}% of the move is "
+                     f"already gone.")
+                    + " You cannot see their other leg: this position may be "
+                      "hedged on Kalshi, in a sportsbook, or against an equity. "
+                      "Attention prompt only - form your own view before acting."
                 ),
             ))
 

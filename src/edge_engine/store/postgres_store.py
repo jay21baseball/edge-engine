@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS journal (
     stake DOUBLE PRECISION, outcome DOUBLE PRECISION, pnl DOUBLE PRECISION,
     resolved_ts TIMESTAMPTZ, notes TEXT
 );
+CREATE TABLE IF NOT EXISTS bot_state (
+    chat_id TEXT, key TEXT, value TEXT, updated TIMESTAMPTZ,
+    PRIMARY KEY (chat_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS cross_venue_log (
     id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, kalshi_id TEXT, poly_id TEXT,
     title TEXT, gross_spread DOUBLE PRECISION, net_after_fees DOUBLE PRECISION,
@@ -247,10 +252,91 @@ class PostgresStore:
             row = cur.fetchone()
             return float(row[0]) if row and row[0] is not None else None
 
+    # ------------------------------------------------------------ bot state
+
+    def set_state(self, chat_id: str, key: str, value) -> None:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO bot_state (chat_id, key, value, updated)
+                   VALUES (%s,%s,%s,%s)
+                   ON CONFLICT (chat_id, key) DO UPDATE SET
+                       value=EXCLUDED.value, updated=EXCLUDED.updated""",
+                (str(chat_id), key, json.dumps(value),
+                 datetime.now(timezone.utc)),
+            )
+
+    def get_state(self, chat_id: str, key: str, default=None):
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM bot_state WHERE chat_id=%s AND key=%s",
+                (str(chat_id), key),
+            )
+            row = cur.fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return default
+
+    def signal_by_id(self, signal_id: int) -> Optional[dict]:
+        cols = ("id", "ts", "strategy", "venue", "market_id", "title", "side",
+                "entry_price", "est_probability", "edge", "confidence",
+                "days_to_resolution", "score", "deterministic", "category",
+                "stake", "contracts", "legs", "rationale", "counter_case")
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {', '.join('s.' + c for c in cols)}, "
+                f"j.taken, j.outcome, j.actual_entry, j.pnl "
+                f"FROM signals s LEFT JOIN journal j ON j.signal_id = s.id "
+                f"WHERE s.id = %s",
+                (signal_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return dict(zip(cols + ("taken", "outcome", "actual_entry", "pnl"), row))
+
+    def record_decision(self, signal_id: int, taken: bool,
+                        actual_entry: Optional[float] = None,
+                        stake: Optional[float] = None,
+                        notes: str = "") -> None:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO journal (signal_id, alerted_ts, taken,
+                       actual_entry, stake, notes)
+                   VALUES (%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (signal_id) DO UPDATE SET
+                       taken=EXCLUDED.taken,
+                       actual_entry=COALESCE(EXCLUDED.actual_entry,
+                                             journal.actual_entry),
+                       stake=COALESCE(EXCLUDED.stake, journal.stake),
+                       notes=EXCLUDED.notes""",
+                (signal_id, datetime.now(timezone.utc), taken, actual_entry,
+                 stake, notes),
+            )
+
+    def scorecard(self) -> dict:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT COUNT(*),
+                          COUNT(*) FILTER (WHERE taken),
+                          COUNT(*) FILTER (WHERE NOT taken),
+                          COUNT(*) FILTER (WHERE outcome IS NOT NULL),
+                          COALESCE(SUM(pnl), 0)
+                   FROM journal"""
+            )
+            row = cur.fetchone()
+        keys = ("alerted", "taken", "passed", "resolved", "pnl")
+        return dict(zip(keys, row)) if row else {}
+
     def recent_signals(self, limit: int = 25) -> list[dict]:
-        cols = ("strategy", "venue", "title", "side", "entry_price", "edge",
-                "confidence", "days_to_resolution", "stake", "contracts",
-                "deterministic", "rationale", "counter_case", "ts")
+        """Full rows. The bot rehydrates Signal objects from these and maps
+        briefing positions back to ids, so every column must be present."""
+        cols = ("id", "ts", "strategy", "venue", "market_id", "title", "side",
+                "entry_price", "est_probability", "edge", "confidence",
+                "days_to_resolution", "score", "deterministic", "category",
+                "stake", "contracts", "legs", "rationale", "counter_case")
         with self.connect() as conn, conn.cursor() as cur:
             cur.execute(
                 f"SELECT {', '.join(cols)} FROM signals "

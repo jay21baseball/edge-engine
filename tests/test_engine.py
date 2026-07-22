@@ -465,6 +465,10 @@ class TestAttentionQueue:
         }
         sig = WalletAttentionQueue().build(scores, positions, {"M1": 0.40})[0]
         assert sig.rationale["move_already_captured_pct"] == 0.0
+        # And the counter-case must say so plainly rather than reporting
+        # "0% of the move is gone", which reads as though nothing has happened.
+        assert "AGAINST them" in sig.counter_case
+        assert "may simply be wrong" in sig.counter_case
 
     def test_uses_real_resolution_horizon(self):
         """A 2028 market must not be ranked as if it resolves in a week."""
