@@ -316,6 +316,22 @@ class PostgresStore:
                  stake, notes),
             )
 
+    def pnl_by_strategy(self, since_days: float = 7.0) -> list[dict]:
+        keys = ("strategy", "alerted", "taken", "wins", "losses", "pnl")
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT s.strategy, COUNT(*),
+                          COUNT(*) FILTER (WHERE j.taken),
+                          COUNT(*) FILTER (WHERE j.outcome = 1),
+                          COUNT(*) FILTER (WHERE j.outcome = 0),
+                          COALESCE(SUM(j.pnl), 0)
+                   FROM signals s LEFT JOIN journal j ON j.signal_id = s.id
+                   WHERE s.ts > NOW() - (%s || ' days')::INTERVAL
+                   GROUP BY s.strategy ORDER BY 6 DESC""",
+                (str(since_days),),
+            )
+            return [dict(zip(keys, row)) for row in cur.fetchall()]
+
     def scorecard(self) -> dict:
         with self.connect() as conn, conn.cursor() as cur:
             cur.execute(

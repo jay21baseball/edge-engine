@@ -61,15 +61,18 @@ class TelegramBot:
 
     # ----------------------------------------------------------------- send
 
-    def send(self, chat_id: str, text: str) -> None:
+    def send(self, chat_id: str, text: str) -> Optional[int]:
+        """Send text, returning the message id of the final chunk."""
+        message_id = None
         for chunk in split_message(text):
             try:
-                request_json(
+                result = request_json(
                     f"{TELEGRAM}/bot{self.token}/sendMessage"
                     f"?chat_id={urllib.parse.quote(str(chat_id))}"
                     f"&parse_mode=HTML&disable_web_page_preview=true"
                     f"&text={urllib.parse.quote(chunk)}"
                 )
+                message_id = (result.get("result") or {}).get("message_id")
             except Exception as e:
                 log.error("send failed: %s", e)
                 # Retry once without markup - an unbalanced tag is the usual
@@ -83,6 +86,51 @@ class TelegramBot:
                     )
                 except Exception:
                     log.error("plain-text retry also failed")
+        return message_id
+
+    # -------------------------------------------------------------- one-time
+
+    def register_command_menu(self) -> None:
+        """Populate Telegram's own '/' menu so commands are discoverable."""
+        from .commands import COMMAND_MENU
+        import json as _json
+        try:
+            payload = _json.dumps([
+                {"command": name, "description": description}
+                for name, description in COMMAND_MENU
+            ])
+            request_json(
+                f"{TELEGRAM}/bot{self.token}/setMyCommands"
+                f"?commands={urllib.parse.quote(payload)}"
+            )
+            log.info("registered %d commands in the Telegram menu",
+                     len(COMMAND_MENU))
+        except Exception as e:
+            log.warning("could not register command menu: %s", e)
+
+    def pin_help(self, chat_id: str) -> None:
+        """Pin the command list once, so it is always one tap away.
+
+        Re-pinning on every start would spam the chat, so the message id is
+        remembered and the pin is skipped if it is already in place.
+        """
+        from .commands import HELP_TEXT
+        existing = self.engine.store.get_state(chat_id, "pinned_help_id")
+        if existing:
+            return
+        try:
+            message_id = self.send(chat_id, HELP_TEXT)
+            if not message_id:
+                return
+            request_json(
+                f"{TELEGRAM}/bot{self.token}/pinChatMessage"
+                f"?chat_id={urllib.parse.quote(str(chat_id))}"
+                f"&message_id={message_id}&disable_notification=true"
+            )
+            self.engine.store.set_state(chat_id, "pinned_help_id", message_id)
+            log.info("pinned the command list in chat %s", chat_id)
+        except Exception as e:
+            log.warning("could not pin help: %s", e)
 
     # ---------------------------------------------------------------- parse
 
@@ -177,6 +225,9 @@ class TelegramBot:
         return handled
 
     def run(self) -> None:
+        self.register_command_menu()
+        if self.allowed:
+            self.pin_help(self.allowed)
         log.info("bot listening. ctrl-c to stop.")
         while True:
             try:

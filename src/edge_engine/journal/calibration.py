@@ -56,18 +56,38 @@ class CalibrationReport:
     def cleared_to_scale(self) -> bool:
         return self.is_calibrated
 
+    def progress_bar(self, width: int = 10) -> str:
+        filled = min(width, round(self.n / MIN_SIGNALS_TO_SCALE * width))
+        return "█" * filled + "░" * (width - filled)
+
     def verdict(self) -> str:
+        """Status line. Building a baseline is progress, not a fault.
+
+        The old wording led with INSUFFICIENT DATA, which reads like something
+        broke when in fact nothing has resolved yet - the expected state on day
+        one. A track record you have not earned yet is a countdown, not an error.
+        """
         if self.n < MIN_SIGNALS_TO_SCALE:
-            return (f"INSUFFICIENT DATA - {self.n}/{MIN_SIGNALS_TO_SCALE} resolved "
-                    f"signals. Do not increase bankroll yet.")
+            return (f"Building baseline · {self.n}/{MIN_SIGNALS_TO_SCALE} "
+                    f"resolved  {self.progress_bar()}")
         if not self.is_calibrated:
-            return (f"NOT CALIBRATED - Brier {self.brier:.3f} "
-                    f"(max {MAX_ACCEPTABLE_BRIER}), mean abs error "
-                    f"{self.mean_abs_error:.3f} (max {MAX_CALIBRATION_ERROR}). "
-                    f"The edge estimates are not trustworthy. Do not scale.")
-        return (f"CALIBRATED over {self.n} resolved signals - Brier "
-                f"{self.brier:.3f}, mean abs error {self.mean_abs_error:.3f}. "
-                f"Cleared to increase deployed bankroll.")
+            return (f"Off calibration · Brier {self.brier:.3f} "
+                    f"(target ≤{MAX_ACCEPTABLE_BRIER}), drift "
+                    f"{self.mean_abs_error:.3f} (target ≤{MAX_CALIBRATION_ERROR})")
+        return (f"Calibrated · {self.n} resolved, Brier {self.brier:.3f}, "
+                f"drift {self.mean_abs_error:.3f}")
+
+    def detail(self) -> str:
+        """The sentence explaining what the status line means for sizing."""
+        if self.n < MIN_SIGNALS_TO_SCALE:
+            remaining = MIN_SIGNALS_TO_SCALE - self.n
+            return (f"{remaining} more resolved calls before the model has "
+                    f"earned the right to size up. Log outcomes with /result "
+                    f"to move this along.")
+        if not self.is_calibrated:
+            return ("Predictions are not matching outcomes closely enough to "
+                    "trust the edge estimates. Sizing stays capped.")
+        return "Predictions are matching outcomes. Cleared to scale."
 
     def reliability_table(self) -> str:
         lines = [f"{'bucket':>12} {'n':>5} {'predicted':>10} {'realized':>9} "

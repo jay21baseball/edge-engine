@@ -15,6 +15,13 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 
+# Below this unit size the mechanics stop cooperating: Polymarket rejects orders
+# under 5 shares, Kalshi's fee rounds up to a whole cent per order, and the
+# absolute profit on a good edge rounds to pocket change. Nothing is forbidden -
+# the operator is simply told the truth about what the numbers mean.
+PRACTICAL_MIN_UNIT = 25.0
+
+
 @dataclass
 class BankrollConfig:
     bankroll: float = 2500.0
@@ -67,6 +74,24 @@ class BankrollConfig:
     def unit_size(self) -> float:
         """One unit = the standard bet. Reference point, not a cap."""
         return round(self.bankroll * self.max_single_position_pct / 100.0, 2)
+
+    @property
+    def is_paper_mode(self) -> bool:
+        """True when the unit is too small for the mechanics to work."""
+        return self.unit_size() < PRACTICAL_MIN_UNIT
+
+    @property
+    def bankroll_for_live(self) -> float:
+        """Bankroll needed for a unit to clear the practical minimum."""
+        return PRACTICAL_MIN_UNIT / (self.max_single_position_pct / 100.0)
+
+    def expected_profit_per_trade(self, edge: float = 0.05) -> float:
+        """What a good edge is actually worth per trade at this size.
+
+        Stated in dollars because percentages hide the problem: 5% sounds fine
+        until you see it is nineteen cents.
+        """
+        return self.unit_size() * edge
 
 
 @dataclass

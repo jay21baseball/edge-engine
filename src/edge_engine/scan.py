@@ -342,6 +342,19 @@ class Engine:
     def _apply_discipline(self, signals: list[Signal]) -> list[Signal]:
         """Size every signal and drop the ones the rules refuse."""
         kept: list[Signal] = []
+        # Near-misses are recorded so /whynot can show what was rejected and
+        # why. Seeing the strongest thing you turned down is the only way to
+        # tell a well-calibrated threshold from one that is quietly bleeding
+        # opportunity.
+        rejected: list[dict] = []
+
+        def note(signal: Signal, reason: str) -> None:
+            rejected.append({
+                "title": signal.title[:70], "strategy": signal.strategy,
+                "edge": signal.edge, "price": signal.entry_price,
+                "days": signal.days_to_resolution, "reason": reason,
+            })
+
         for signal in signals:
             # Advisory signals are not trades, so the trade caps do not apply to
             # them - only the strategy gate and the edge floor.
@@ -352,6 +365,7 @@ class Engine:
             )
             if not ok and not signal.advisory:
                 log.info("suppressed '%s': %s", signal.title[:40], why)
+                note(signal, why)
                 continue
             if self.store.recent_signal_exists(signal.strategy, signal.market_id):
                 log.debug("duplicate within window: %s", signal.title[:40])
@@ -386,11 +400,15 @@ class Engine:
                     # is indistinguishable from the scanner being broken.
                     log.info("dropped '%s': not sizeable (%s)",
                              signal.title[:40], sizing.capped_by)
+                    note(signal, f"not sizeable ({sizing.capped_by})")
                     continue
 
             signal_id = self.store.save_signal(signal)
             self.store.mark_alerted(signal_id)
             kept.append(signal)
+
+        rejected.sort(key=lambda r: -r["edge"])
+        self.store.set_state("_system", "last_rejections", rejected[:10])
         return kept
 
     # --------------------------------------------------------------- wallets

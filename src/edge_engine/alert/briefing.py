@@ -56,17 +56,46 @@ WEEKLY = BriefingWindow("WEEKLY EDGE", max_days=10.0, max_plays=WEEKLY_MAX_PLAYS
                         next_view="/all")
 
 
+RULE = "━" * 22
+THIN = "─" * 22
+
+
 def _header(window: BriefingWindow, state: DisciplineState,
             now: Optional[datetime] = None) -> list[str]:
     now = now or datetime.now(timezone.utc)
     config = state.config
-    return [
-        f"<b>{window.name}</b> · {now.strftime('%a %b %d')}",
-        f"<code>Bankroll {money(config.bankroll)}   "
-        f"Unit {money(config.unit_size())}</code>",
-        f"<code>Trades {state.trades_today}/{config.max_trades_per_day}   "
-        f"Exposure {money(state.current_exposure)}/"
+    lines = [
+        f"<b>{window.name}</b>",
+        f"<i>{now.strftime('%A, %B %d')}</i>",
+        RULE,
+        f"<code>BANKROLL   {money(config.bankroll)}</code>",
+        f"<code>UNIT       {money(config.unit_size())}</code>",
+        f"<code>TRADES     {state.trades_today} of "
+        f"{config.max_trades_per_day}</code>",
+        f"<code>EXPOSURE   {money(state.current_exposure)} of "
         f"{money(config.max_concurrent_exposure)}</code>",
+        "",
+    ]
+    if config.is_paper_mode:
+        lines += _paper_mode_notice(config)
+    return lines
+
+
+def _paper_mode_notice(config) -> list[str]:
+    """Say plainly what a sub-minimum unit means, in dollars.
+
+    Percentages hide this: a 5% edge sounds healthy until it is priced out as
+    nineteen cents against a fee that is structurally ~4% of stake.
+    """
+    per_trade = config.expected_profit_per_trade(0.05)
+    return [
+        "📋 <b>PAPER MODE</b>",
+        f"<i>A unit of {money(config.unit_size())} earns "
+        f"{money(per_trade)} on a strong 5% edge, and Polymarket rejects "
+        f"orders under 5 shares. Track the calls and log outcomes to build "
+        f"the record — the analysis is identical, only the stakes are not "
+        f"real yet. Live sizing starts around "
+        f"{money(config.bankroll_for_live)}.</i>",
         "",
     ]
 
@@ -90,68 +119,67 @@ def render_play(signal: Signal, index: Optional[int], solo: bool = False) -> lis
     tag = "🔒" if signal.deterministic else ("👁" if signal.advisory else "📈")
     heading = "THE PLAY" if solo else f"PLAY {index}"
 
+    mark = grade(signal.score, signal.edge, signal.confidence,
+                 signal.deterministic)
     lines = [
-        f"<b>═══ {heading} ═══</b>",
+        RULE,
+        f"<b>{heading}</b>  ·  grade <b>{mark}</b>",
         f"{tag} <b>{signal.title[:70]}</b>",
-        f"<i>{signal.venue.value.title()} · {label} · "
-        f"grade {grade(signal.score, signal.edge, signal.confidence, signal.deterministic)}</i>",
+        f"<i>{signal.venue.value.title()} · {label}</i>",
         "",
     ]
 
     if signal.deterministic:
-        rationale = signal.rationale
+        r = signal.rationale
         lines += [
-            f"<code>BUY  {signal.side.replace('_', ' ').upper()}</code>",
-            f"<code>Legs        {rationale.get('legs', '?')}</code>",
-            f"<code>Cost        {money(rationale.get('cost_at_size'))}</code>",
-            f"<code>Fees        {money(rationale.get('fees_at_size'))}</code>",
-            f"<code>Guaranteed  {money(rationale.get('net_profit'))} "
+            f"<code>ACTION     BUY {signal.side.replace('_', ' ').upper()}</code>",
+            f"<code>LEGS       {r.get('legs', '?')}</code>",
+            f"<code>COST       {money(r.get('cost_at_size'))}</code>",
+            f"<code>FEES       {money(r.get('fees_at_size'))}</code>",
+            f"<code>LOCKED     {money(r.get('net_profit'))} "
             f"({signal.edge * 100:+.2f}%)</code>",
         ]
     else:
         lines += [
-            f"<code>BET  {signal.side.upper()}</code>",
-            f"<code>Market      {price_line(market)}</code>",
+            f"<code>ACTION     BET {signal.side.upper()}</code>",
+            f"<code>MARKET     {price_line(market)}</code>",
         ]
         if not signal.advisory and fair and fair != market:
             lines += [
-                f"<code>Fair value  {price_line(fair)}</code>",
-                f"<code>Your edge   {edge_points(fair, market):+.1f} pts</code>",
+                f"<code>FAIR       {price_line(fair)}</code>",
+                f"<code>EDGE       {edge_points(fair, market):+.1f} pts</code>",
             ]
         else:
-            lines.append(f"<code>Edge est.   {signal.edge * 100:+.2f}%</code>")
+            lines.append(f"<code>EDGE       {signal.edge * 100:+.2f}% est.</code>")
 
-    lines.append(
-        f"<code>Confidence  {confidence_bar(signal.confidence)} "
-        f"{signal.confidence * 100:.0f}%</code>"
-    )
+    lines += [
+        f"<code>CONFIDENCE {confidence_bar(signal.confidence)} "
+        f"{signal.confidence * 100:.0f}%</code>",
+        f"<code>RESOLVES   {horizon(signal.days_to_resolution)} · "
+        f"{resolve_date(signal.days_to_resolution)}</code>",
+    ]
 
     if signal.advisory:
         lines += [
             "",
-            "<b>NO STAKE — research only.</b>",
+            "<b>NO STAKE — research only</b>",
             "<i>Screened wallets are positioned here. That is a reason to look, "
-            "not a reason to bet. Form your own view first.</i>",
+            "not a reason to bet.</i>",
         ]
     elif signal.stake:
         win = payout(signal.stake, market)
         lines += [
             "",
-            f"<b>STAKE {money(signal.stake)}</b>  "
-            f"({signal.contracts:,.0f} contracts)",
-            f"<code>Risk {money(signal.stake)} to win {money(win)}</code>",
+            f"<code>STAKE      {money(signal.stake)} "
+            f"({signal.contracts:,.0f} contracts)</code>",
+            f"<code>TO WIN     {money(win)}</code>",
         ]
-
-    lines.append(
-        f"<code>Resolves    {horizon(signal.days_to_resolution)} "
-        f"({resolve_date(signal.days_to_resolution)})</code>"
-    )
 
     why = _why(signal)
     if why:
-        lines += ["", f"<b>Why:</b> {why}"]
+        lines += ["", f"<b>WHY</b>  {why}"]
     if signal.counter_case:
-        lines += [f"<b>Against:</b> <i>{signal.counter_case[:300]}</i>"]
+        lines += ["", f"<b>AGAINST</b>  <i>{signal.counter_case[:300]}</i>"]
 
     lines.append("")
     return lines
@@ -186,7 +214,8 @@ def _why(signal: Signal) -> str:
 def build_briefing(signals: list[Signal], state: DisciplineState,
                    window: BriefingWindow = DAILY,
                    calibration_verdict: str = "",
-                   now: Optional[datetime] = None) -> str:
+                   now: Optional[datetime] = None,
+                   calibration_detail: str = "") -> str:
     """Render a briefing. Ranked, filtered, and deliberately short."""
     out = _header(window, state, now)
 
@@ -209,8 +238,8 @@ def build_briefing(signals: list[Signal], state: DisciplineState,
 
         if solo:
             out += [
-                "<i>One play clearly ahead of the field today. "
-                "Concentration beats dilution when the gap is this wide.</i>",
+                "<i>One play clearly ahead of the field. Concentration beats "
+                "dilution when the gap is this wide.</i>",
                 "",
             ]
             out += render_play(top[0], 1, solo=True)
@@ -222,9 +251,10 @@ def build_briefing(signals: list[Signal], state: DisciplineState,
         if actionable:
             total = sum(s.stake or 0 for s in actionable)
             out += [
-                f"<code>Total at risk today {money(total)} "
-                f"({total / max(state.config.bankroll, 1) * 100:.1f}% of bankroll)"
-                f"</code>",
+                THIN,
+                f"<code>AT RISK    {money(total)} "
+                f"({total / max(state.config.bankroll, 1) * 100:.1f}% of "
+                f"bankroll)</code>",
                 "",
             ]
 
@@ -237,16 +267,15 @@ def build_briefing(signals: list[Signal], state: DisciplineState,
         ]
 
     if calibration_verdict:
-        out += ["<b>─── CALIBRATION ───</b>", f"<i>{calibration_verdict}</i>", ""]
+        out += [THIN, "<b>TRACK RECORD</b>", f"<code>{calibration_verdict}</code>"]
+        if calibration_detail:
+            out += [f"<i>{calibration_detail}</i>"]
+        out += [""]
 
-    out += [
-        "<code>/took 1        logged as taken</code>",
-        "<code>/skip 1        logged as passed</code>",
-        "<code>/explain 1     full reasoning</code>",
-        "",
-        "<i>Order tickets, not advice. Verify every price before you click — "
-        "nothing here is placed for you.</i>",
-    ]
+    if eligible:
+        out += [THIN,
+                "<code>/explain 1</code> · <code>/took 1</code> · "
+                "<code>/skip 1</code>"]
     return "\n".join(out)
 
 

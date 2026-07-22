@@ -214,7 +214,57 @@ class TestBriefingConviction:
     def test_total_at_risk_is_reported(self, engine):
         signals = [_signal(0.05, 2, "A"), _signal(0.048, 2, "B")]
         text = build_briefing(signals, self._state(engine), DAILY)
-        assert "Total at risk" in text
+        assert "AT RISK" in text
+        assert "of bankroll" in text
+
+    def test_no_order_ticket_footer(self, engine):
+        """That footer was removed - it repeated on every message."""
+        text = build_briefing([_signal(0.05, 2)], self._state(engine), DAILY)
+        assert "Order tickets, not advice" not in text
+
+
+class TestPaperMode:
+    def test_tiny_bankroll_is_flagged_with_real_numbers(self, engine):
+        """At $77 the unit is $3.85 - say what that means in dollars."""
+        engine.set_bankroll("c", 77.0)
+        text = build_briefing([], engine.state, DAILY)
+        assert "PAPER MODE" in text
+        assert "$3.85" in text
+        assert "$0.19" in text          # a 5% edge on a $3.85 unit
+
+    def test_workable_bankroll_has_no_notice(self, engine):
+        engine.set_bankroll("c", 2500.0)
+        assert "PAPER MODE" not in build_briefing([], engine.state, DAILY)
+
+    def test_threshold_is_reported(self, engine):
+        engine.set_bankroll("c", 77.0)
+        assert "$500.00" in build_briefing([], engine.state, DAILY)
+
+    def test_config_exposes_the_state(self, engine):
+        engine.set_bankroll("c", 77.0)
+        assert engine.bankroll.is_paper_mode
+        engine.set_bankroll("c", 5000.0)
+        assert not engine.bankroll.is_paper_mode
+
+
+class TestCalibrationWording:
+    def test_baseline_reads_as_progress_not_error(self):
+        from edge_engine.journal.calibration import build_report
+        report = build_report([])
+        assert "INSUFFICIENT" not in report.verdict()
+        assert "Building baseline" in report.verdict()
+        assert "0/100" in report.verdict()
+
+    def test_detail_says_what_unlocks_it(self):
+        from edge_engine.journal.calibration import build_report
+        assert "/result" in build_report([]).detail()
+
+    def test_calibrated_state_reads_cleanly(self):
+        from edge_engine.journal.calibration import build_report
+        predictions = [(0.7, 1.0)] * 70 + [(0.7, 0.0)] * 30
+        report = build_report(predictions)
+        assert "Calibrated" in report.verdict()
+        assert "Cleared to scale" in report.detail()
 
 
 class TestSignalRoundTrip:
@@ -241,6 +291,143 @@ class TestSignalRoundTrip:
         assert ids and len(ids) == 2
         top = engine.store.signal_by_id(ids[0])
         assert top["title"] == "Best"     # ordering matches the briefing
+
+
+class TestWhyNot:
+    def test_reports_nothing_when_no_scan_has_run(self, engine):
+        assert "Nothing was rejected" in HANDLERS["whynot"](engine, "c", [], None)
+
+    def test_lists_rejections_strongest_first(self, engine):
+        engine.store.set_state("_system", "last_rejections", [
+            {"title": "Big miss", "strategy": "combinatorial_arb",
+             "edge": 0.08, "price": 0.40, "days": 2.0,
+             "reason": "Daily trade cap reached"},
+            {"title": "Small miss", "strategy": "wallet_attention",
+             "edge": 0.01, "price": 0.50, "days": 5.0,
+             "reason": "Edge below floor"},
+        ])
+        text = HANDLERS["whynot"](engine, "c", [], None)
+        assert "Big miss" in text and "Small miss" in text
+        assert text.index("Big miss") < text.index("Small miss")
+        assert "Daily trade cap" in text
+
+    def test_shows_odds_and_the_reason(self, engine):
+        engine.store.set_state("_system", "last_rejections", [
+            {"title": "X", "strategy": "s", "edge": 0.08, "price": 0.40,
+             "days": 2.0, "reason": "Edge below floor"},
+        ])
+        text = HANDLERS["whynot"](engine, "c", [], None)
+        assert "+150" in text          # 0.40 -> +150
+        assert "Edge below floor" in text
+
+    def test_scan_records_rejections(self, engine):
+        """A signal blocked by the trade cap must show up in /whynot."""
+        engine.set_bankroll("c", 2500.0)
+        engine.state.trades_today = engine.bankroll.max_trades_per_day
+        engine._apply_discipline([_signal(0.10, 2.0, "Blocked", det=True)])
+        rejected = engine.store.get_state("_system", "last_rejections")
+        assert rejected and rejected[0]["title"] == "Blocked"
+        assert "cap" in rejected[0]["reason"].lower()
+
+
+class TestPnl:
+    def test_empty_is_stated_plainly(self, engine):
+        assert "No signals" in HANDLERS["pnl"](engine, "c", [], None)
+
+    def test_groups_by_strategy(self, engine):
+        engine.store.save_signal(_signal(0.05, 2.0, "A"))
+        text = HANDLERS["pnl"](engine, "c", ["week"], None)
+        assert "THIS WEEK" in text
+        assert "Locked arbitrage" in text      # friendly label, not the slug
+
+    def test_warns_while_the_sample_is_thin(self, engine):
+        engine.store.save_signal(_signal(0.05, 2.0, "A"))
+        text = HANDLERS["pnl"](engine, "c", [], None)
+        assert "means little" in text
+
+    def test_window_argument_changes_the_label(self, engine):
+        engine.store.save_signal(_signal(0.05, 2.0, "A"))
+        assert "TODAY" in HANDLERS["pnl"](engine, "c", ["today"], None)
+        assert "THIS MONTH" in HANDLERS["pnl"](engine, "c", ["month"], None)
+
+
+class TestWatch:
+    def test_empty_watchlist_explains_usage(self, engine):
+        text = HANDLERS["watch"](engine, "c", [], None)
+        assert "empty" in text
+        assert "/watch cuba 40" in text
+
+    def test_adds_a_target(self, engine):
+        text = HANDLERS["watch"](engine, "c", ["cuba", "40"], None)
+        assert "+150" in text          # 40c -> +150
+        assert engine.store.get_state("c", "watchlist")[0]["target"] == 0.40
+
+    def test_multi_word_terms(self, engine):
+        HANDLERS["watch"](engine, "c", ["fed", "rate", "cut", "35"], None)
+        assert engine.store.get_state("c", "watchlist")[0]["term"] == \
+               "fed rate cut"
+
+    def test_replaces_rather_than_duplicates(self, engine):
+        HANDLERS["watch"](engine, "c", ["cuba", "40"], None)
+        HANDLERS["watch"](engine, "c", ["cuba", "30"], None)
+        watchlist = engine.store.get_state("c", "watchlist")
+        assert len(watchlist) == 1
+        assert watchlist[0]["target"] == pytest.approx(0.30)
+
+    def test_clear(self, engine):
+        HANDLERS["watch"](engine, "c", ["cuba", "40"], None)
+        HANDLERS["watch"](engine, "c", ["clear"], None)
+        assert engine.store.get_state("c", "watchlist") == []
+
+    def test_rejects_bad_price(self, engine):
+        assert "must be a price" in HANDLERS["watch"](
+            engine, "c", ["cuba", "abc"], None)
+        assert "between" in HANDLERS["watch"](engine, "c", ["cuba", "150"], None)
+
+    def test_fires_once_when_target_is_hit(self, engine):
+        from datetime import timedelta
+
+        from edge_engine.bot.commands import check_watchlist
+        from edge_engine.ingest.models import Event, Market
+        HANDLERS["watch"](engine, "c", ["cuba", "40"], None)
+        market = Market(
+            venue=Venue.POLYMARKET, market_id="m1", event_id="e1",
+            title="US strike on Cuba", category="geopolitics",
+            yes_ask=0.35, close_ts=None,
+        )
+        event = Event(venue=Venue.POLYMARKET, event_id="e1",
+                      title="Cuba", category="geopolitics", markets=[market])
+        fired = check_watchlist(engine, "c", [event])
+        assert len(fired) == 1
+        assert "WATCH TRIGGERED" in fired[0]
+        # Must not re-fire on the next scan while it sits below target.
+        assert check_watchlist(engine, "c", [event]) == []
+
+    def test_does_not_fire_above_target(self, engine):
+        from edge_engine.bot.commands import check_watchlist
+        from edge_engine.ingest.models import Event, Market
+        HANDLERS["watch"](engine, "c", ["cuba", "40"], None)
+        market = Market(venue=Venue.POLYMARKET, market_id="m1", event_id="e1",
+                        title="US strike on Cuba", category="geopolitics",
+                        yes_ask=0.55)
+        event = Event(venue=Venue.POLYMARKET, event_id="e1", title="Cuba",
+                      category="geopolitics", markets=[market])
+        assert check_watchlist(engine, "c", [event]) == []
+
+
+class TestHelpAndMenu:
+    def test_help_lists_every_registered_command(self, engine):
+        from edge_engine.bot.commands import COMMAND_MENU
+        text = HANDLERS["help"](engine, "c", [], None)
+        for name, _ in COMMAND_MENU:
+            assert f"/{name}" in text, f"/{name} missing from help"
+
+    def test_menu_entries_are_valid_telegram_commands(self):
+        from edge_engine.bot.commands import COMMAND_MENU, HANDLERS as H
+        for name, description in COMMAND_MENU:
+            assert name in H, f"{name} is advertised but has no handler"
+            assert name.islower() and name.isalnum()
+            assert 1 <= len(description) <= 256
 
 
 class TestJournalCommands:

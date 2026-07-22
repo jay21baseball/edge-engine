@@ -11,7 +11,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ..alert.briefing import DAILY, WEEKLY, build_briefing, render_play
+from ..alert.briefing import (
+    DAILY,
+    STRATEGY_LABEL,
+    WEEKLY,
+    build_briefing,
+    render_play,
+)
 from ..alert.format import (
     american_str,
     cents,
@@ -109,11 +115,12 @@ def _run_briefing(engine, chat_id: str, window, reply) -> str:
             reply("Scanning both venues… about 30 seconds.")
         engine.scan_once()
 
-    signals = [_signal_from_row(r) for r in engine.store.recent_signals(limit=40)]
-    verdict = build_report(engine.store.resolved_predictions()).verdict()
-    text = build_briefing(signals, engine.state, window, verdict)
-    engine.remember_briefing(chat_id, engine.store.recent_signals(limit=40),
-                             window)
+    rows = engine.store.recent_signals(limit=40)
+    signals = [_signal_from_row(r) for r in rows]
+    report = build_report(engine.store.resolved_predictions())
+    text = build_briefing(signals, engine.state, window, report.verdict(),
+                          calibration_detail=report.detail())
+    engine.remember_briefing(chat_id, rows, window)
     return text
 
 
@@ -266,15 +273,16 @@ def cmd_scorecard(engine, chat_id, args, reply=None) -> str:
     alerted = card.get("alerted") or 0
     taken = card.get("taken") or 0
     lines = [
-        "<b>SCORECARD</b>", "",
-        f"<code>Alerted    {alerted}</code>",
-        f"<code>Taken      {taken}</code>",
-        f"<code>Passed     {card.get('passed') or 0}</code>",
-        f"<code>Resolved   {card.get('resolved') or 0}</code>",
-        f"<code>Net P&L    {money(card.get('pnl') or 0)}</code>",
+        "<b>SCORECARD</b>", "─" * 22,
+        f"<code>ALERTED    {alerted}</code>",
+        f"<code>TAKEN      {taken}</code>",
+        f"<code>PASSED     {card.get('passed') or 0}</code>",
+        f"<code>RESOLVED   {card.get('resolved') or 0}</code>",
+        f"<code>NET P&L    {money(card.get('pnl') or 0)}</code>",
         "",
-        "<b>─── CALIBRATION ───</b>",
-        f"<i>{report.verdict()}</i>",
+        "<b>TRACK RECORD</b>",
+        f"<code>{report.verdict()}</code>",
+        f"<i>{report.detail()}</i>",
     ]
     if report.n:
         lines += ["", f"<pre>{report.reliability_table()}</pre>"]
@@ -284,6 +292,164 @@ def cmd_scorecard(engine, chat_id, args, reply=None) -> str:
                        "you can act. Both are fixable, but they need opposite "
                        "fixes — /explain a few you passed on.</i>"]
     return "\n".join(lines)
+
+
+def cmd_whynot(engine, chat_id, args, reply=None) -> str:
+    """The strongest opportunities that were REJECTED, and why.
+
+    The most useful diagnostic here. If the near-misses look like money, the
+    thresholds are too tight; if they look like junk, they are right. Seeing
+    only what passed tells you nothing about what a different threshold would
+    have caught.
+    """
+    rejected = engine.store.get_state("_system", "last_rejections", []) or []
+    if not rejected:
+        return ("Nothing was rejected on the last scan — every candidate "
+                "either passed or never reached the discipline layer.\n\n"
+                "<i>Run <code>/dailyedge</code> first if you have not scanned "
+                "today.</i>")
+    lines = ["<b>REJECTED · NEAR MISSES</b>",
+             "<i>What the filters turned down, strongest first.</i>", ""]
+    for item in rejected[:6]:
+        lines += [
+            f"<b>{item['title']}</b>",
+            f"<code>EDGE       {item['edge'] * 100:+.2f}% at "
+            f"{american_str(item['price'])}</code>",
+            f"<code>RESOLVES   {horizon(item['days'])}</code>",
+            f"<code>REJECTED   {item['reason'][:60]}</code>",
+            "",
+        ]
+    lines.append(
+        "<i>If these keep looking like money left on the table, the edge floor "
+        "is too high. If they look like junk, the filters are working. That "
+        "judgement is yours — the system cannot make it for you.</i>"
+    )
+    return "\n".join(lines)
+
+
+def cmd_pnl(engine, chat_id, args, reply=None) -> str:
+    """P&L by strategy, so you learn which edge is actually paying."""
+    days = 7.0
+    if args:
+        days = {"day": 1.0, "today": 1.0, "week": 7.0, "month": 30.0,
+                "all": 3650.0}.get(args[0].lower(), 7.0)
+    rows = engine.store.pnl_by_strategy(days)
+    if not rows:
+        return f"No signals recorded in the last {days:.0f} days."
+
+    label = {1.0: "TODAY", 7.0: "THIS WEEK",
+             30.0: "THIS MONTH"}.get(days, "ALL TIME")
+    lines = [f"<b>P&L BY STRATEGY · {label}</b>", ""]
+    total = 0.0
+    for row in rows:
+        name = STRATEGY_LABEL.get(row["strategy"], row["strategy"])
+        wins, losses = row.get("wins") or 0, row.get("losses") or 0
+        settled = wins + losses
+        pnl = row.get("pnl") or 0.0
+        total += pnl
+        lines += [f"<b>{name}</b>",
+                  f"<code>ALERTED    {row.get('alerted') or 0}</code>",
+                  f"<code>TAKEN      {row.get('taken') or 0}</code>"]
+        if settled:
+            lines.append(f"<code>RECORD     {wins}-{losses} "
+                         f"({wins / settled * 100:.0f}%)</code>")
+        lines += [f"<code>P&L        {money(pnl)}</code>", ""]
+    lines += ["─" * 22, f"<code>TOTAL      {money(total)}</code>", ""]
+
+    settled_any = sum((r.get("wins") or 0) + (r.get("losses") or 0)
+                      for r in rows)
+    if settled_any < 20:
+        lines.append(
+            f"<i>Only {settled_any} settled result"
+            f"{'' if settled_any == 1 else 's'} so far. Any strategy can look "
+            f"brilliant or broken over a handful of trades — this table means "
+            f"little until roughly 20 each.</i>"
+        )
+    return "\n".join(lines)
+
+
+def cmd_watch(engine, chat_id, args, reply=None) -> str:
+    """Track a market and alert when it crosses a price you name."""
+    watchlist = engine.store.get_state(chat_id, "watchlist", []) or []
+
+    if not args:
+        if not watchlist:
+            return ("<b>WATCHLIST · empty</b>\n\n"
+                    "<code>/watch cuba 40</code>\n\n"
+                    "<i>Alerts when a market matching “cuba” trades at 40¢ or "
+                    "better.</i>")
+        lines = ["<b>WATCHLIST</b>", ""]
+        for i, item in enumerate(watchlist, 1):
+            lines.append(f"<code>{i}. {item['term'][:22]:<23}"
+                         f"{american_str(item['target'])} "
+                         f"({cents(item['target'])})</code>")
+        lines += ["", "<code>/watch clear</code> to reset"]
+        return "\n".join(lines)
+
+    if args[0].lower() in ("clear", "reset", "none"):
+        engine.store.set_state(chat_id, "watchlist", [])
+        return "Watchlist cleared."
+    if len(args) < 2:
+        return ("Give a search term and a target price:\n"
+                "<code>/watch cuba 40</code>")
+    try:
+        target = float(args[-1].replace("¢", "").replace("$", ""))
+        if target > 1:
+            target /= 100.0
+    except ValueError:
+        return "The last value must be a price, e.g. <code>40</code> for 40¢."
+    if not (0 < target < 1):
+        return "Target must be between 1¢ and 99¢."
+
+    term = " ".join(args[:-1]).lower()
+    watchlist = [w for w in watchlist if w["term"] != term]
+    watchlist.append({"term": term, "target": target})
+    engine.store.set_state(chat_id, "watchlist", watchlist[:20])
+    return "\n".join([
+        f"<b>Watching “{term}”</b>",
+        f"<code>ALERT AT   {american_str(target)} ({cents(target)}) "
+        f"or better</code>", "",
+        f"<i>{len(watchlist)} on watch · checked every scan</i>",
+    ])
+
+
+def check_watchlist(engine, chat_id: str, events) -> list[str]:
+    """Alert texts for any watched market that hit its target.
+
+    Fired keys are remembered so a market sitting below your target does not
+    re-alert on every scan for the rest of the week.
+    """
+    watchlist = engine.store.get_state(chat_id, "watchlist", []) or []
+    if not watchlist:
+        return []
+    fired: list[str] = []
+    already = set(engine.store.get_state(chat_id, "watch_fired", []) or [])
+    for event in events:
+        for market in event.markets:
+            if market.status != "open" or not market.yes_ask:
+                continue
+            haystack = f"{event.title} {market.title}".lower()
+            for item in watchlist:
+                if item["term"] not in haystack:
+                    continue
+                if market.yes_ask > item["target"]:
+                    continue
+                key = f"{market.market_id}:{item['target']}"
+                if key in already:
+                    continue
+                already.add(key)
+                fired.append("\n".join([
+                    "🔔 <b>WATCH TRIGGERED</b>",
+                    f"<b>{market.title[:70]}</b>",
+                    f"<code>NOW        {american_str(market.yes_ask)} "
+                    f"({cents(market.yes_ask)})</code>",
+                    f"<code>TARGET     {american_str(item['target'])} "
+                    f"({cents(item['target'])})</code>", "",
+                    "<i>Price alert only — no edge has been assessed. You "
+                    "asked to be told, so you are being told.</i>",
+                ]))
+    engine.store.set_state(chat_id, "watch_fired", sorted(already)[-200:])
+    return fired
 
 
 # -------------------------------------------------------------------- status
@@ -334,30 +500,64 @@ def cmd_wallets(engine, chat_id, args, reply=None) -> str:
     return "\n".join(lines)
 
 
+HELP_TEXT = "\n".join([
+    "<b>FORGE</b>",
+    "<i>Prediction market edge · Kalshi + Polymarket</i>",
+    "━" * 22, "",
+    "<b>FIND PLAYS</b>",
+    "<code>/dailyedge</code>   best plays to enter today",
+    "<code>/weeklyedge</code>  the week's plan",
+    "<code>/all</code>         every open opportunity",
+    "<code>/whynot</code>      what got rejected, and why",
+    "",
+    "<b>ACT ON A PLAY</b>",
+    "<code>/explain 1</code>   full reasoning + counter-case",
+    "<code>/took 1 46</code>   logged as taken at 46¢",
+    "<code>/skip 1</code>      logged as passed",
+    "<code>/result 1 win</code>  settle it",
+    "",
+    "<b>TRACK</b>",
+    "<code>/pnl week</code>    which strategy is actually paying",
+    "<code>/scorecard</code>   record + calibration",
+    "<code>/status</code>      exposure, caps, breaker",
+    "<code>/wallets</code>     screened traders being followed",
+    "",
+    "<b>SET UP</b>",
+    "<code>/bankroll 2500</code>  resize everything",
+    "<code>/watch cuba 40</code>  alert when it hits 40¢",
+    "<code>/help</code>        this list",
+    "",
+    "━" * 22,
+    "<i>Plain English works too — “daily edge”, “any plays”.</i>",
+    "<i>Nothing is ever traded for you.</i>",
+])
+
+# Registered with Telegram so typing "/" shows a menu of these.
+COMMAND_MENU = [
+    ("dailyedge", "Best plays to enter today"),
+    ("weeklyedge", "The week's plan"),
+    ("all", "Every open opportunity"),
+    ("whynot", "What got rejected, and why"),
+    ("explain", "Full reasoning for a play"),
+    ("took", "Log a play as taken"),
+    ("skip", "Log a play as passed"),
+    ("result", "Settle a play win/loss"),
+    ("pnl", "P&L by strategy"),
+    ("scorecard", "Record and calibration"),
+    ("status", "Exposure, caps, breaker"),
+    ("wallets", "Screened traders followed"),
+    ("watch", "Alert at a target price"),
+    ("bankroll", "Set bankroll and resize"),
+    ("help", "All commands"),
+]
+
+
 def cmd_help(engine, chat_id, args, reply=None) -> str:
-    return "\n".join([
-        "<b>FORGE — prediction market edge</b>", "",
-        "<b>Daily use</b>",
-        "<code>/dailyedge</code>    best plays to enter today",
-        "<code>/weeklyedge</code>   the week's plan",
-        "<code>/all</code>          every open opportunity", "",
-        "<b>Acting on a play</b>",
-        "<code>/explain 1</code>    full reasoning and the counter-case",
-        "<code>/took 1 46</code>    logged as taken at 46¢",
-        "<code>/skip 1</code>       logged as passed",
-        "<code>/result 1 win</code> settle it", "",
-        "<b>Tracking</b>",
-        "<code>/scorecard</code>    P&L and whether the model is calibrated",
-        "<code>/status</code>       exposure, caps, circuit breaker",
-        "<code>/wallets</code>      the screened traders being followed",
-        "<code>/bankroll 2500</code> resize everything", "",
-        "<i>Nothing is ever traded for you. Every play is an order ticket you "
-        "fill yourself.</i>",
-    ])
+    return HELP_TEXT
 
 
 HANDLERS: dict[str, Callable] = {
-    "start": cmd_help, "help": cmd_help,
+    "start": cmd_help, "help": cmd_help, "commands": cmd_help,
     "bankroll": cmd_bankroll,
     "dailyedge": cmd_daily, "daily": cmd_daily,
     "weeklyedge": cmd_weekly, "weekly": cmd_weekly,
@@ -369,6 +569,9 @@ HANDLERS: dict[str, Callable] = {
     "scorecard": cmd_scorecard, "score": cmd_scorecard,
     "status": cmd_status,
     "wallets": cmd_wallets,
+    "whynot": cmd_whynot, "why_not": cmd_whynot, "rejected": cmd_whynot,
+    "pnl": cmd_pnl, "profit": cmd_pnl,
+    "watch": cmd_watch, "watchlist": cmd_watch,
 }
 
 # Natural phrasings, so the bot answers "daily edge" as readily as "/dailyedge".
@@ -378,4 +581,8 @@ ALIASES = {
     "weekly edge": "weeklyedge", "this week": "weeklyedge",
     "score card": "scorecard", "my score": "scorecard",
     "what do i do": "dailyedge", "any plays": "dailyedge",
+    "why not": "whynot", "what got rejected": "whynot",
+    "near misses": "whynot", "rejected": "whynot",
+    "profit": "pnl", "how am i doing": "pnl",
+    "watch list": "watch", "my watchlist": "watch",
 }

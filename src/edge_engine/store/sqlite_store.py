@@ -315,6 +315,23 @@ class SqliteStore:
                  actual_entry, stake, notes),
             )
 
+    def pnl_by_strategy(self, since_days: float = 7.0) -> list[dict]:
+        """Which edge is actually paying. Kill what is not."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT s.strategy,
+                          COUNT(*)                                    AS alerted,
+                          SUM(CASE WHEN j.taken=1 THEN 1 ELSE 0 END)  AS taken,
+                          SUM(CASE WHEN j.outcome=1 THEN 1 ELSE 0 END) AS wins,
+                          SUM(CASE WHEN j.outcome=0 THEN 1 ELSE 0 END) AS losses,
+                          COALESCE(SUM(j.pnl), 0)                     AS pnl
+                   FROM signals s LEFT JOIN journal j ON j.signal_id = s.id
+                   WHERE s.ts > datetime('now', ?)
+                   GROUP BY s.strategy ORDER BY pnl DESC""",
+                (f"-{since_days} days",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def scorecard(self) -> dict:
         with self.connect() as conn:
             row = conn.execute(
