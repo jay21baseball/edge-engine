@@ -44,6 +44,11 @@ class Signal:
     rationale: dict[str, Any] = field(default_factory=dict)
     counter_case: str = ""
     deterministic: bool = False      # True = arithmetic, not a forecast
+    # Advisory signals carry no probability forecast of their own - they say
+    # "this market deserves your attention", not "this is mispriced by X". Kelly
+    # correctly sizes them at zero, so they must be delivered UNSIZED rather than
+    # dropped, or the wallet attention queue can never reach the operator.
+    advisory: bool = False
     ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     stake: Optional[float] = None
     contracts: Optional[float] = None

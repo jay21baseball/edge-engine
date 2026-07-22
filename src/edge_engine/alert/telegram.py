@@ -53,14 +53,18 @@ class TelegramNotifier:
 
 def format_signal(signal: Signal, index: Optional[int] = None) -> str:
     prefix = f"<b>{index}. </b>" if index else ""
-    tag = "🔒 ARB" if signal.deterministic else "👁 ATTENTION"
+    tag = ("🔒 ARB" if signal.deterministic
+           else "👁 RESEARCH" if signal.advisory else "📈 TRADE")
     lines = [
         f"{prefix}{tag} — <b>{signal.title[:80]}</b>",
         f"   {signal.venue.value.upper()} · {signal.side} @ {signal.entry_price:.3f}",
         f"   edge <b>{signal.edge * 100:+.2f}%</b> net · "
         f"{signal.days_to_resolution:.1f}d · score {signal.score:.4f}",
     ]
-    if signal.stake:
+    if signal.advisory:
+        lines.append("   <i>no position size — this is a prompt to go look, "
+                     "not a trade</i>")
+    elif signal.stake:
         lines.append(f"   stake <b>${signal.stake:,.2f}</b> "
                      f"({signal.contracts:,.0f} contracts)")
 

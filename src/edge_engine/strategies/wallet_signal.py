@@ -246,7 +246,15 @@ class WalletAttentionQueue(Strategy):
         positions_by_wallet: dict[str, list[WalletPosition]],
         current_prices: dict[str, float],
         now: Optional[datetime] = None,
+        days_to_resolution: Optional[dict[str, float]] = None,
     ) -> list[Signal]:
+        """`current_prices` are YES prices keyed by conditionId.
+
+        The NO price is derived as (1 - yes) per market, because a wallet holding
+        NO must be compared against the NO price. Comparing a NO entry against a
+        YES quote produced edges of +44% and "move already gone" figures of
+        -683%, which is how that bug announced itself.
+        """
         now = now or datetime.now(timezone.utc)
         qualified = {a: s for a, s in scores.items() if s.qualified}
         if not qualified:
@@ -267,8 +275,12 @@ class WalletAttentionQueue(Strategy):
             if len(members) < self.min_agreeing:
                 continue
 
-            current = current_prices.get(market_id)
-            if current is None or not (0 < current < 1):
+            yes_price = current_prices.get(market_id)
+            if yes_price is None or not (0 < yes_price < 1):
+                continue
+            # Price the side they actually hold.
+            current = yes_price if side is Side.YES else 1.0 - yes_price
+            if not (0 < current < 1):
                 continue
 
             avg_entry = statistics.fmean([p.avg_price for _, p in members])
@@ -279,6 +291,9 @@ class WalletAttentionQueue(Strategy):
             # says do not bother, and it is shown on every alert.
             headroom = 1.0 - avg_entry
             captured = (current - avg_entry) / headroom if headroom > 1e-6 else 1.0
+            # Clamp: a negative value means the price moved AGAINST them, which
+            # is not "negative decay" - none of their edge has been captured yet.
+            captured = min(max(captured, 0.0), 1.0)
             remaining = max(0.0, 1.0 - captured)
             if captured >= self.max_edge_decay:
                 log.debug("%s: %.0f%% of move already gone, suppressed",
@@ -303,8 +318,15 @@ class WalletAttentionQueue(Strategy):
                 est_probability=current,   # no independent forecast is claimed
                 edge=wallet_edge * remaining,
                 confidence=confidence,
-                days_to_resolution=7.0,
+                # Real horizon, not a placeholder. A 2028 election market ranked
+                # as if it resolved in a week defeats the whole edge-per-day
+                # ranking and floods the queue with capital that would be locked
+                # up for years.
+                days_to_resolution=(days_to_resolution or {}).get(market_id, 30.0),
                 deterministic=False,
+                # No independent forecast is claimed, so this is never sized.
+                # It is a prompt to go look, not an instruction to buy.
+                advisory=True,
                 rationale={
                     "agreeing_wallets": len(members),
                     "wallets": [

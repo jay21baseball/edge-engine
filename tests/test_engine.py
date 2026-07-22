@@ -270,6 +270,24 @@ class TestDiscipline:
         assert not st.can_trade("combinatorial_arb", edge=0.01)[0]
         assert st.can_trade("combinatorial_arb", edge=0.10)[0]
 
+    def test_locked_arb_gets_a_lower_floor_than_a_forecast(self):
+        """The floor buys cushion against variance and estimation error.
+
+        A deterministic arb carries neither, so holding it to the forecast bar
+        would reject genuinely free money.
+        """
+        st = self._state(bankroll=2500, min_edge_threshold_pct=4.0)
+        assert st.min_edge_for(deterministic=True) < st.min_edge_for(False)
+        # A 2% locked arb is real money; a 2% forecast is inside the error bars.
+        assert st.can_trade("combinatorial_arb", edge=0.02, deterministic=True)[0]
+        assert not st.can_trade("wallet_attention", edge=0.02)[0]
+
+    def test_locked_arb_floor_still_covers_execution_risk(self):
+        st = self._state(bankroll=2500)
+        assert st.min_edge_for(deterministic=True) > 0
+        assert not st.can_trade("combinatorial_arb", edge=0.0001,
+                                deterministic=True)[0]
+
 
 # ------------------------------------------------------------------ wallets
 
@@ -419,6 +437,49 @@ class TestAttentionQueue:
         }
         assert WalletAttentionQueue(max_edge_decay=0.5).build(
             scores, positions, {"M1": 0.75}) == []
+
+    def test_no_holders_priced_against_the_no_side(self):
+        """Regression: NO entries were compared against the YES quote.
+
+        That produced edges of +44% and 'move already gone' of -683%.
+        """
+        scores = {a: self._qualified(a) for a in ("0xa", "0xb")}
+        positions = {
+            a: [WalletPosition(a, "M1", "Market 1", Side.NO, 100, 0.88,
+                               current_price=0.91, redeemable=False)]
+            for a in ("0xa", "0xb")
+        }
+        # YES quote of 0.09 means the NO price is 0.91 - the side they hold.
+        sig = WalletAttentionQueue().build(scores, positions, {"M1": 0.09})[0]
+        assert sig.entry_price == pytest.approx(0.91)
+        assert 0 <= sig.rationale["move_already_captured_pct"] <= 100
+        assert sig.edge < 0.2
+
+    def test_capture_never_goes_negative(self):
+        """A price moving AGAINST them is 0% captured, not negative decay."""
+        scores = {a: self._qualified(a) for a in ("0xa", "0xb")}
+        positions = {
+            a: [WalletPosition(a, "M1", "Market 1", Side.YES, 100, 0.60,
+                               current_price=0.40, redeemable=False)]
+            for a in ("0xa", "0xb")
+        }
+        sig = WalletAttentionQueue().build(scores, positions, {"M1": 0.40})[0]
+        assert sig.rationale["move_already_captured_pct"] == 0.0
+
+    def test_uses_real_resolution_horizon(self):
+        """A 2028 market must not be ranked as if it resolves in a week."""
+        scores = {a: self._qualified(a) for a in ("0xa", "0xb")}
+        positions = {
+            a: [WalletPosition(a, "M1", "Market 1", Side.YES, 100, 0.40,
+                               current_price=0.45, redeemable=False)]
+            for a in ("0xa", "0xb")
+        }
+        sig = WalletAttentionQueue().build(
+            scores, positions, {"M1": 0.45}, days_to_resolution={"M1": 900.0})[0]
+        assert sig.days_to_resolution == pytest.approx(900.0)
+        fast = WalletAttentionQueue().build(
+            scores, positions, {"M1": 0.45}, days_to_resolution={"M1": 2.0})[0]
+        assert fast.score > sig.score * 100
 
     def test_alert_states_decayed_edge_and_hidden_leg_risk(self):
         scores = {a: self._qualified(a) for a in ("0xa", "0xb")}

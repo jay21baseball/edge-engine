@@ -125,8 +125,20 @@ class DisciplineState:
     def circuit_breaker_tripped(self) -> bool:
         return self.weekly_drawdown_pct >= self.config.drawdown_circuit_breaker_pct
 
-    def can_trade(self, strategy: str = "", edge: float = 0.0
-                  ) -> tuple[bool, str]:
+    def min_edge_for(self, deterministic: bool = False) -> float:
+        """The edge floor, which is not the same bar for both kinds of signal.
+
+        The floor buys two things: a cushion against variance, and a margin for
+        being wrong about the probability. A deterministic arb has neither risk -
+        the payout is arithmetic - so holding it to the same bar as a forecast
+        rejects genuinely free money. It still needs SOME floor to cover
+        slippage and execution risk between legs.
+        """
+        base = self.config.effective_min_edge
+        return min(base * 0.25, 0.01) if deterministic else base
+
+    def can_trade(self, strategy: str = "", edge: float = 0.0,
+                  deterministic: bool = False) -> tuple[bool, str]:
         """The gate every signal passes through before it can be alerted."""
         if self.circuit_breaker_tripped:
             return False, (
@@ -150,10 +162,12 @@ class DisciplineState:
                 f"'{strategy}' requires a ${gate:,.0f} bankroll "
                 f"(currently ${self.config.bankroll:,.0f})."
             )
-        if edge and edge < self.config.effective_min_edge:
+        floor = self.min_edge_for(deterministic)
+        if edge and edge < floor:
+            kind = "locked-arb" if deterministic else "forecast"
             return False, (
-                f"Edge {edge * 100:.2f}% below floor "
-                f"{self.config.effective_min_edge * 100:.2f}% for this bankroll."
+                f"Edge {edge * 100:.2f}% below the {kind} floor "
+                f"{floor * 100:.2f}% for this bankroll."
             )
         return True, "ok"
 

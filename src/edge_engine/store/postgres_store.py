@@ -247,6 +247,18 @@ class PostgresStore:
             row = cur.fetchone()
             return float(row[0]) if row and row[0] is not None else None
 
+    def recent_signals(self, limit: int = 25) -> list[dict]:
+        cols = ("strategy", "venue", "title", "side", "entry_price", "edge",
+                "confidence", "days_to_resolution", "stake", "contracts",
+                "deterministic", "rationale", "counter_case", "ts")
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {', '.join(cols)} FROM signals "
+                f"ORDER BY ts DESC, score DESC LIMIT %s",
+                (limit,),
+            )
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
     def latest_wallet_score(self, address: str) -> Optional[dict]:
         with self.connect() as conn, conn.cursor() as cur:
             cur.execute(

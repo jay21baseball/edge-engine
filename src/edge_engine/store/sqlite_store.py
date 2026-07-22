@@ -250,6 +250,17 @@ class SqliteStore:
             ).fetchone()
         return row[0] if row and row[0] is not None else None
 
+    def recent_signals(self, limit: int = 25) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT strategy, venue, title, side, entry_price, edge,
+                          confidence, days_to_resolution, stake, contracts,
+                          deterministic, rationale, counter_case, ts
+                   FROM signals ORDER BY ts DESC, score DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def latest_wallet_score(self, address: str) -> Optional[dict]:
         with self.connect() as conn:
             row = conn.execute(

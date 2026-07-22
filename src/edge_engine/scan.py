@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -287,6 +288,7 @@ class Engine:
             return []
 
         prices: dict[str, float] = {}
+        horizons: dict[str, float] = {}
         for event in events:
             if event.venue is not Venue.POLYMARKET:
                 continue
@@ -294,6 +296,7 @@ class Engine:
                 condition_id = str(market.raw.get("conditionId") or "")
                 if condition_id and market.yes_ask:
                     prices[condition_id] = market.yes_ask
+                    horizons[condition_id] = market.days_to_resolution
 
         scores, positions = {}, {}
         for address in qualified[:60]:
@@ -309,7 +312,8 @@ class Engine:
 
         if not scores:
             return []
-        found = self.attention.build(scores, positions, prices)
+        found = self.attention.build(scores, positions, prices,
+                                     days_to_resolution=horizons)
         log.info("wallet attention: %d qualified wallets -> %d signals",
                  len(scores), len(found))
         return found
@@ -337,33 +341,50 @@ class Engine:
         """Size every signal and drop the ones the rules refuse."""
         kept: list[Signal] = []
         for signal in signals:
-            ok, why = self.state.can_trade(signal.strategy, signal.edge)
-            if not ok:
+            # Advisory signals are not trades, so the trade caps do not apply to
+            # them - only the strategy gate and the edge floor.
+            ok, why = self.state.can_trade(
+                signal.strategy,
+                0.0 if signal.advisory else signal.edge,
+                deterministic=signal.deterministic,
+            )
+            if not ok and not signal.advisory:
                 log.info("suppressed '%s': %s", signal.title[:40], why)
                 continue
             if self.store.recent_signal_exists(signal.strategy, signal.market_id):
+                log.debug("duplicate within window: %s", signal.title[:40])
                 continue
 
-            sizing = size_position(
-                prob=signal.est_probability, price=signal.entry_price,
-                bankroll=self.bankroll.bankroll,
-                kelly_multiplier=self.bankroll.kelly_fraction,
-                max_single_position_pct=self.bankroll.max_single_position_pct,
-                available_capital=self.state.available_capital,
-                min_order_size=5.0 if signal.venue is Venue.POLYMARKET else 1.0,
-            )
-            if signal.deterministic and not sizing.is_actionable:
-                # A locked arb has no probabilistic edge for Kelly to size, so
-                # fall back to the exposure cap rather than dropping it.
-                stake = min(self.state.available_capital,
-                            self.bankroll.unit_size())
-                signal.stake = round(stake, 2)
-                signal.contracts = round(stake / max(signal.entry_price, 0.01), 0)
-            elif sizing.is_actionable:
-                signal.stake = sizing.stake
-                signal.contracts = sizing.contracts
+            if signal.advisory:
+                # Deliver unsized. It is a research prompt, and forcing a stake
+                # onto it would dress a "go look at this" up as a "buy this".
+                signal.stake = None
+                signal.contracts = None
             else:
-                continue
+                sizing = size_position(
+                    prob=signal.est_probability, price=signal.entry_price,
+                    bankroll=self.bankroll.bankroll,
+                    kelly_multiplier=self.bankroll.kelly_fraction,
+                    max_single_position_pct=self.bankroll.max_single_position_pct,
+                    available_capital=self.state.available_capital,
+                    min_order_size=5.0 if signal.venue is Venue.POLYMARKET else 1.0,
+                )
+                if signal.deterministic and not sizing.is_actionable:
+                    # A locked arb has no probabilistic edge for Kelly to size,
+                    # so fall back to the exposure cap rather than dropping it.
+                    stake = min(self.state.available_capital,
+                                self.bankroll.unit_size())
+                    signal.stake = round(stake, 2)
+                    signal.contracts = round(stake / max(signal.entry_price, 0.01), 0)
+                elif sizing.is_actionable:
+                    signal.stake = sizing.stake
+                    signal.contracts = sizing.contracts
+                else:
+                    # Never drop silently. A signal vanishing without explanation
+                    # is indistinguishable from the scanner being broken.
+                    log.info("dropped '%s': not sizeable (%s)",
+                             signal.title[:40], sizing.capped_by)
+                    continue
 
             signal_id = self.store.save_signal(signal)
             self.store.mark_alerted(signal_id)
@@ -422,7 +443,8 @@ class Engine:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="edge-engine")
     parser.add_argument("command",
-                        choices=["scan", "watch", "wallets", "status", "sports"])
+                        choices=["scan", "watch", "wallets", "status", "sports",
+                                 "signals"])
     parser.add_argument("--all", action="store_true",
                         help="sports: include out-of-season leagues")
     parser.add_argument("--config", default="config.yaml")
@@ -445,6 +467,33 @@ def main(argv: Optional[list[str]] = None) -> int:
             mark = "ON " if engine.bankroll.strategy_enabled(name) else "OFF"
             print(f"  [{mark}] {name:<22} (needs ${gate:,.0f})")
         print(f"\nstored rows: {engine.store.counts()}")
+        return 0
+
+    if args.command == "signals":
+        rows = engine.store.recent_signals(limit=25)
+        if not rows:
+            print("No signals recorded yet. Run a scan first.")
+            return 0
+        print(f"{len(rows)} most recent signals (newest first):\n")
+        for r in rows:
+            rationale = json.loads(r["rationale"] or "{}")
+            kind = "ARB " if r["deterministic"] else "WATCH"
+            print(f"[{kind}] {r['title'][:56]}")
+            print(f"        {r['venue']} {r['side']} @ {r['entry_price']:.3f}"
+                  f"   edge {r['edge'] * 100:+.2f}%"
+                  f"   {r['days_to_resolution']:.1f}d"
+                  f"   stake ${r['stake'] or 0:,.2f}")
+            if r["strategy"] == "wallet_attention":
+                print(f"        {rationale.get('agreeing_wallets')} wallets in at "
+                      f"{rationale.get('their_avg_entry')}, now "
+                      f"{rationale.get('current_price')} - "
+                      f"{rationale.get('move_already_captured_pct')}% of the move "
+                      f"already gone")
+            elif r["strategy"] == "sportsbook_divergence":
+                print(f"        sharp says {rationale.get('devigged_probability')}, "
+                      f"Polymarket asks {rationale.get('polymarket_ask')} "
+                      f"({rationale.get('sharp_source')})")
+            print()
         return 0
 
     if args.command == "sports":
