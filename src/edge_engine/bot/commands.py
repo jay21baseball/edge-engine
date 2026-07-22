@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from functools import partial
 from typing import Callable, Optional
 
 from ..alert.briefing import (
@@ -294,6 +295,169 @@ def cmd_scorecard(engine, chat_id, args, reply=None) -> str:
     return "\n".join(lines)
 
 
+# Categories as they appear on the two venues. Each maps to the substrings that
+# identify it, because Kalshi and Polymarket label the same tab differently.
+CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "sports": ("sport", "nfl", "nba", "mlb", "nhl", "soccer", "football",
+               "basketball", "baseball", "hockey", "tennis", "golf", "ufc",
+               "mma", "boxing", "racing", "olympics"),
+    "politics": ("politic", "election", "congress", "senate", "president",
+                 "governor", "primary"),
+    "crypto": ("crypto", "bitcoin", "ethereum", "btc", "eth", "solana"),
+    "economics": ("econ", "fed", "cpi", "inflation", "jobs", "gdp", "rates"),
+    "weather": ("weather", "temperature", "climate", "hurricane", "snow"),
+    "geopolitics": ("geopolit", "world", "war", "nato", "ukraine", "israel"),
+    "tech": ("tech", "ai", "openai", "apple", "google", "space"),
+    "culture": ("culture", "entertainment", "movie", "music", "award",
+                "oscar", "grammy", "tv"),
+    "mentions": ("mention",),
+    "finance": ("financ", "stock", "market", "earnings", "sp500", "nasdaq"),
+}
+
+
+def _matches_category(signal, category: str) -> bool:
+    """True when a signal belongs to a category tab.
+
+    Matches on the venue's own category field first, then falls back to the
+    market title — Kalshi and Polymarket label the same tab differently, and a
+    signal's category is sometimes blank on one venue but obvious from the
+    question text.
+    """
+    needles = CATEGORY_ALIASES.get(category, (category,))
+    haystack = f"{signal.category} {signal.title}".lower()
+    return any(needle in haystack for needle in needles)
+
+
+def cmd_category(engine, chat_id, args, reply=None, category: str = "") -> str:
+    """Every open opportunity in one category, regardless of horizon."""
+    if not engine.has_bankroll(chat_id):
+        engine.store.set_state(chat_id, "pending", "DAILY EDGE")
+        return ("<b>What is your bankroll right now?</b>\n\n"
+                "Reply with just the number, e.g. <code>2500</code>")
+
+    age = engine.minutes_since_scan()
+    if age is None or age > FRESH_SCAN_MAX_AGE_MINUTES:
+        if reply:
+            reply("Scanning… about 30 seconds.")
+        engine.scan_once()
+
+    rows = engine.store.recent_signals(limit=80)
+    signals = [_signal_from_row(r) for r in rows]
+    matching = [s for s in signals if _matches_category(s, category)]
+
+    if not matching:
+        others = sorted({s.category for s in signals if s.category})
+        lines = [f"<b>{category.upper()}</b>", "─" * 22, "",
+                 f"No {category} opportunities cleared the filters right now."]
+        if others:
+            lines += ["", f"<i>Currently seeing signals in: "
+                          f"{', '.join(others[:8])}.</i>"]
+        lines += ["", "<i>An empty category is a real answer, not a fault — it "
+                      "means nothing there beat the bar today.</i>",
+                  "", "<code>/tabs</code> to see every category"]
+        return "\n".join(lines)
+
+    matching.sort(key=lambda s: -s.score)
+    from ..alert.briefing import BriefingWindow
+    window = BriefingWindow(category.upper(), 3650.0, 8,
+                            f"NO {category.upper()} PLAYS", "/tabs")
+    report = build_report(engine.store.resolved_predictions())
+    text = build_briefing(matching, engine.state, window, report.verdict(),
+                          calibration_detail=report.detail())
+    engine.remember_briefing(chat_id, [r for r in rows if _matches_category(
+        _signal_from_row(r), category)], window)
+    return text
+
+
+def cmd_tabs(engine, chat_id, args, reply=None) -> str:
+    """What is live in each category right now."""
+    rows = engine.store.recent_signals(limit=80)
+    signals = [_signal_from_row(r) for r in rows]
+    lines = ["<b>CATEGORIES</b>",
+             "<i>Signals currently open in each tab.</i>", "─" * 22]
+    for category in CATEGORY_ALIASES:
+        hits = [s for s in signals if _matches_category(s, category)]
+        best = max((s.edge for s in hits), default=0.0)
+        marker = "•" if hits else " "
+        detail = (f"{len(hits):>2} · best {best * 100:+.1f}%" if hits
+                  else " —")
+        lines.append(f"<code>{marker} /{category:<12}{detail}</code>")
+    lines += ["", "<i>Tap any command to see that tab in full.</i>"]
+    return "\n".join(lines)
+
+
+def cmd_arb(engine, chat_id, args, reply=None) -> str:
+    """Arbitrage only — the deterministic plays, across every category."""
+    age = engine.minutes_since_scan()
+    if age is None or age > FRESH_SCAN_MAX_AGE_MINUTES:
+        if reply:
+            reply("Scanning for arbitrage… about 30 seconds.")
+        engine.scan_once()
+
+    rows = engine.store.recent_signals(limit=80)
+    signals = [s for s in (_signal_from_row(r) for r in rows)
+               if s.deterministic]
+    if not signals:
+        gate = engine.bankroll.gate_for("cross_venue_arb")
+        return "\n".join([
+            "<b>ARBITRAGE</b>", "─" * 22, "",
+            "No locked arbitrage open right now.", "",
+            "<i>This is the normal state. Across ~9,700 events a typical scan "
+            "finds 20 candidates that look arbitraged on quoted prices and "
+            "zero that survive real fees and real order-book depth. The "
+            "scanner reports what is left after those two tests, which is "
+            "usually nothing — that is the filter working.</i>", "",
+            f"<i>Cross-venue arbitrage unlocks at "
+            f"{money(gate)} (you are at {money(engine.bankroll.bankroll)}); "
+            f"until then it logs opportunities without sizing them, so you "
+            f"can see whether it was ever real at your scale.</i>",
+        ])
+    from ..alert.briefing import BriefingWindow
+    window = BriefingWindow("ARBITRAGE", 3650.0, 8, "NO ARBITRAGE", "/tabs")
+    return build_briefing(signals, engine.state, window)
+
+
+def cmd_strategies(engine, chat_id, args, reply=None) -> str:
+    """What the system actually runs, and what each is worth."""
+    config = engine.bankroll
+    def status(name: str) -> str:
+        if not config.strategy_enabled(name):
+            return f"LOCKED (needs {money(config.gate_for(name))})"
+        return "ACTIVE"
+
+    return "\n".join([
+        "<b>STRATEGIES</b>",
+        "<i>What runs, and why each earns its place.</i>",
+        "━" * 22, "",
+        f"<b>1 · Combinatorial arbitrage</b>  [{status('combinatorial_arb')}]",
+        "<i>Mutually exclusive outcomes that do not sum correctly. Buy every "
+        "outcome below the guaranteed payout. Arithmetic, not a forecast — so "
+        "it alerts at just 1% edge. Rare: most candidates die on fees or on "
+        "order-book depth.</i>", "",
+        f"<b>2 · Sharp money</b>  [{status('wallet_attention')}]",
+        "<i>Polymarket wallets screened on entry-adjusted edge, calibration, "
+        "P&L concentration, and market-maker exclusion. Roughly half the "
+        "public leaderboard fails the last test alone. Output is a research "
+        "queue, never a copy signal — you never see their other leg.</i>", "",
+        f"<b>3 · Stale lines</b>  [{status('sportsbook_divergence')}]",
+        "<i>Sharp sportsbooks move on injury news in seconds; Polymarket takes "
+        "minutes to hours. One leg, one venue, no leg risk — the strongest "
+        "edge available at a small bankroll. Needs a free odds API key.</i>",
+        "",
+        f"<b>4 · Cross-venue arbitrage</b>  [{status('cross_venue_arb')}]",
+        "<i>Same event priced differently on Kalshi and Polymarket. Gated: "
+        "manual two-venue execution means one mis-filled leg costs 5-10% of a "
+        "small stack and erases twenty good arbs. Logs opportunities below the "
+        "gate so you can judge it on data rather than my opinion.</i>", "",
+        f"<b>5 · Passive liquidity</b>  [{status('passive_liquidity')}]",
+        "<i>Earning the spread rather than predicting outcomes. Needs size to "
+        "absorb inventory risk.</i>", "",
+        "━" * 22,
+        "<code>/arb</code>  locked arbitrage only",
+        "<code>/tabs</code> what is live per category",
+    ])
+
+
 def cmd_whynot(engine, chat_id, args, reply=None) -> str:
     """The strongest opportunities that were REJECTED, and why.
 
@@ -510,6 +674,16 @@ HELP_TEXT = "\n".join([
     "<code>/all</code>         every open opportunity",
     "<code>/whynot</code>      what got rejected, and why",
     "",
+    "<b>BY CATEGORY</b>",
+    "<code>/tabs</code>        what is live in each tab",
+    "<code>/sports</code>  <code>/politics</code>  <code>/crypto</code>",
+    "<code>/economics</code>  <code>/weather</code>  <code>/tech</code>",
+    "<code>/geopolitics</code>  <code>/culture</code>  <code>/finance</code>",
+    "",
+    "<b>STRATEGY</b>",
+    "<code>/arb</code>         locked arbitrage only",
+    "<code>/strategies</code>  what runs and why",
+    "",
     "<b>ACT ON A PLAY</b>",
     "<code>/explain 1</code>   full reasoning + counter-case",
     "<code>/took 1 46</code>   logged as taken at 46¢",
@@ -538,6 +712,15 @@ COMMAND_MENU = [
     ("weeklyedge", "The week's plan"),
     ("all", "Every open opportunity"),
     ("whynot", "What got rejected, and why"),
+    ("tabs", "What is live in each category"),
+    ("sports", "Sports opportunities"),
+    ("politics", "Politics opportunities"),
+    ("crypto", "Crypto opportunities"),
+    ("economics", "Fed, CPI, jobs"),
+    ("weather", "Weather opportunities"),
+    ("geopolitics", "Geopolitics (zero fees on Polymarket)"),
+    ("arb", "Locked arbitrage only"),
+    ("strategies", "What runs and why"),
     ("explain", "Full reasoning for a play"),
     ("took", "Log a play as taken"),
     ("skip", "Log a play as passed"),
@@ -572,7 +755,14 @@ HANDLERS: dict[str, Callable] = {
     "whynot": cmd_whynot, "why_not": cmd_whynot, "rejected": cmd_whynot,
     "pnl": cmd_pnl, "profit": cmd_pnl,
     "watch": cmd_watch, "watchlist": cmd_watch,
+    "tabs": cmd_tabs, "categories": cmd_tabs,
+    "arb": cmd_arb, "arbitrage": cmd_arb,
+    "strategies": cmd_strategies, "strategy": cmd_strategies,
 }
+
+# One command per category tab on both venues.
+for _cat in CATEGORY_ALIASES:
+    HANDLERS[_cat] = partial(cmd_category, category=_cat)
 
 # Natural phrasings, so the bot answers "daily edge" as readily as "/dailyedge".
 ALIASES = {
