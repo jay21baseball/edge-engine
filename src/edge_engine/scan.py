@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .alert.rules import Alerter, AlertPolicy, format_alert
 from .alert.telegram import TelegramNotifier, build_briefing
 from .ingest.kalshi import KalshiClient
 from .ingest.models import Event, Market, OrderBook, Venue
@@ -129,6 +130,12 @@ class Engine:
         self.attention = WalletAttentionQueue()
         self.odds = OddsApiClient(config.get("odds_api_key"))
         self.sportsbook = SportsbookDivergence()
+        self.alerter = Alerter(self.store, AlertPolicy(
+            max_per_day=int(config.get("max_alerts_per_day", 5)),
+            respect_quiet_hours=bool(config.get("respect_quiet_hours", True)),
+            quiet_start_hour=int(config.get("quiet_start_hour", 23)),
+            quiet_end_hour=int(config.get("quiet_end_hour", 7)),
+        ))
         self._book_cache: dict[str, OrderBook] = {}
         self._odds_cache: list = []
         self._odds_fetched_at: float = -1e9
@@ -214,7 +221,9 @@ class Engine:
             log.warning("data went stale during scan - suppressing all alerts")
             return []
 
-        return self._apply_discipline(sorted(signals, key=lambda s: -s.score))
+        kept = self._apply_discipline(sorted(signals, key=lambda s: -s.score))
+        self._last_events = events
+        return kept
 
     def _odds_due(self, every_minutes: float) -> bool:
         """Wall-clock gate, so the throttle survives ephemeral cloud runs.
@@ -409,6 +418,7 @@ class Engine:
 
         rejected.sort(key=lambda r: -r["edge"])
         self.store.set_state("_system", "last_rejections", rejected[:10])
+        self._last_events = getattr(self, "_last_events", None)
         return kept
 
     # --------------------------------------------------------------- wallets
@@ -450,6 +460,38 @@ class Engine:
                  len(scores), len(qualified), mm)
         return {"scores": scores, "positions": positions_by_wallet,
                 "qualified": qualified, "market_makers": mm}
+
+    def push_alerts(self, signals: list[Signal], events=None) -> int:
+        """Push anything good enough to interrupt for. Returns how many fired.
+
+        Separate from the daily briefing on purpose: the briefing is pull (you
+        ask), this is push (something appeared that will not keep). The rules in
+        alert.rules are bars to clear, not filters to pass - an alerter that
+        fires on everything trains you to ignore it.
+        """
+        chat_id = str(self.config.get("telegram_chat_id") or "")
+        if not chat_id:
+            return 0
+
+        decisions = self.alerter.select(signals, chat_id)
+        for decision in decisions:
+            self.notifier.send(format_alert(decision))
+        if decisions:
+            # Record only what was actually sent, in one pass - re-running
+            # select() here would return a different set now that the daily
+            # count has moved.
+            self.alerter.record_sent(chat_id, decisions)
+            log.info("pushed %d alert(s)", len(decisions))
+        sent = len(decisions)
+
+        # Watchlist triggers are a separate channel: the operator asked to be
+        # told about a price, so no edge assessment gates them.
+        if events:
+            from .bot.commands import check_watchlist
+            for text in check_watchlist(self, chat_id, events):
+                self.notifier.send(text)
+                sent += 1
+        return sent
 
     # ------------------------------------------------------------ bot support
 
@@ -610,10 +652,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.command == "scan":
         signals = engine.scan_once()
-        text = engine.briefing(signals)
-        engine.notifier.send(text)
-        if not engine.notifier.enabled:
-            pass  # already printed by the notifier
+        engine.push_alerts(signals, getattr(engine, "_last_events", None))
+        engine.notifier.send(engine.briefing(signals))
         return 0
 
     if args.command == "watch":
@@ -634,9 +674,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                     last_wallet_refresh = time.monotonic()
 
                 signals = engine.scan_once()
-                if signals:
-                    engine.notifier.send(engine.briefing(signals))
-                else:
+                # Push first: anything urgent should not wait behind a digest.
+                pushed = engine.push_alerts(
+                    signals, getattr(engine, "_last_events", None)
+                )
+                if signals and not pushed:
+                    log.info("%d signal(s) found, none cleared the alert bar",
+                             len(signals))
+                elif not signals:
                     log.info("nothing cleared threshold")
             except KeyboardInterrupt:
                 log.info("stopped")

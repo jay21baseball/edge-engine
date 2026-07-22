@@ -74,6 +74,24 @@ odds_sports:
 store: null
 database_url: null
 
+# ---------------------------------------------------- push alerts
+# The daily briefing is pull (you ask). These are push (something appeared that
+# will not keep). Every rule is a bar to clear, not a filter to pass — an
+# alerter that fires on everything trains you to ignore it, and then it fires on
+# the one that mattered and you swipe it away with the rest.
+#
+# Per-strategy bars live in src/edge_engine/alert/rules.py (DEFAULT_RULES).
+# A locked arb needs only 1% edge to alert; a sportsbook divergence needs 6%;
+# sharp-money concentration needs 10%. That asymmetry is deliberate — arithmetic
+# earns a lower bar than an estimate that can be wrong.
+max_alerts_per_day: 5
+
+# Quiet hours (UTC). Locked arbs and anything resolving within 12 hours pierce
+# them; everything else waits for morning.
+respect_quiet_hours: true
+quiet_start_hour: 23
+quiet_end_hour: 7
+
 # ---------------------------------------------------------------- scanning
 scan_interval_seconds: 300
 
