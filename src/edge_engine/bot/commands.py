@@ -458,6 +458,74 @@ def cmd_strategies(engine, chat_id, args, reply=None) -> str:
     ])
 
 
+def cmd_review(engine, chat_id, args, reply=None) -> str:
+    """The daily five-minute check: is this working, and what should change?
+
+    Deliberately opinionated. It names the single most limiting thing rather
+    than printing a wall of numbers - a dashboard you have to interpret is a
+    dashboard you stop opening.
+    """
+    card = engine.store.scorecard()
+    report = build_report(engine.store.resolved_predictions())
+    rejected = engine.store.get_state("_system", "last_rejections", []) or []
+    qualified = engine.store.qualified_wallets()
+
+    alerted = card.get("alerted") or 0
+    taken = card.get("taken") or 0
+    decided = taken + (card.get("passed") or 0)
+    resolved = card.get("resolved") or 0
+
+    lines = [
+        "<b>DAILY REVIEW</b>",
+        f"<i>{datetime.now(timezone.utc).strftime('%A, %B %d')}</i>",
+        "-" * 22,
+        f"<code>SIGNALS     {alerted}</code>",
+        f"<code>LOGGED      {decided} of {alerted}</code>",
+        f"<code>RESOLVED    {resolved} of 100</code>  {report.progress_bar()}",
+        f"<code>NET P&L     {money(card.get('pnl') or 0)}</code>",
+        f"<code>WALLETS     {len(qualified)} qualified</code>",
+        "", "<b>THE ONE THING</b>",
+    ]
+
+    if alerted == 0:
+        lines.append("<i>No signals yet. Run <code>/dailyedge</code> - nothing "
+                     "can be measured until the system has made calls.</i>")
+    elif decided < alerted * 0.5:
+        lines.append(
+            f"<i>{alerted - decided} signals are unlogged. Every unlogged call "
+            f"is a data point thrown away, and the track record cannot fill "
+            f"without them. Use <code>/took</code> or <code>/skip</code> on all "
+            f"of them - especially the ones you ignored.</i>")
+    elif taken and taken / max(decided, 1) < 0.15:
+        lines.append(
+            "<i>You are acting on under 15% of what clears the bar. Either the "
+            "threshold is too loose or the edge decays before you can act - "
+            "opposite problems with opposite fixes. <code>/whynot</code> and a "
+            "few <code>/explain</code> calls will tell you which.</i>")
+    elif resolved < 20:
+        lines.append(f"<i>{20 - resolved} more settled results before these "
+                     f"numbers mean anything. Use <code>/result</code> as "
+                     f"markets close.</i>")
+    elif not report.is_calibrated:
+        lines.append("<i>Predictions are not matching outcomes closely enough "
+                     "to trust the edge estimates. Do not raise stake size. "
+                     "<code>/scorecard</code> shows which bands are drifting.</i>")
+    else:
+        lines.append("<i>Calibration is holding. This is the point where "
+                     "raising bankroll is justified by evidence, not hope.</i>")
+
+    if rejected:
+        top = rejected[0]
+        lines += ["", "<b>CLOSEST MISS</b>",
+                  f"<i>{top['title'][:55]} - {top['edge'] * 100:+.1f}%, "
+                  f"rejected: {top['reason'][:45]}</i>"]
+
+    lines += ["", "-" * 22,
+              "<code>/scorecard</code> full numbers · <code>/tabs</code> "
+              "by category"]
+    return "\n".join(lines)
+
+
 def cmd_whynot(engine, chat_id, args, reply=None) -> str:
     """The strongest opportunities that were REJECTED, and why.
 
@@ -691,6 +759,7 @@ HELP_TEXT = "\n".join([
     "<code>/result 1 win</code>  settle it",
     "",
     "<b>TRACK</b>",
+    "<code>/review</code>     daily check: is this working?",
     "<code>/pnl week</code>    which strategy is actually paying",
     "<code>/scorecard</code>   record + calibration",
     "<code>/status</code>      exposure, caps, breaker",
@@ -712,6 +781,7 @@ COMMAND_MENU = [
     ("weeklyedge", "The week's plan"),
     ("all", "Every open opportunity"),
     ("whynot", "What got rejected, and why"),
+    ("review", "Daily check: is this working?"),
     ("tabs", "What is live in each category"),
     ("sports", "Sports opportunities"),
     ("politics", "Politics opportunities"),
@@ -756,6 +826,7 @@ HANDLERS: dict[str, Callable] = {
     "pnl": cmd_pnl, "profit": cmd_pnl,
     "watch": cmd_watch, "watchlist": cmd_watch,
     "tabs": cmd_tabs, "categories": cmd_tabs,
+    "review": cmd_review, "check": cmd_review,
     "arb": cmd_arb, "arbitrage": cmd_arb,
     "strategies": cmd_strategies, "strategy": cmd_strategies,
 }

@@ -266,11 +266,11 @@ def build_briefing(signals: list[Signal], state: DisciplineState,
             "",
         ]
 
-    if calibration_verdict:
-        out += [THIN, "<b>TRACK RECORD</b>", f"<code>{calibration_verdict}</code>"]
-        if calibration_detail:
-            out += [f"<i>{calibration_detail}</i>"]
-        out += [""]
+    # Track record lives in /scorecard, not here. It is the number that decides
+    # whether any of this is real, but repeating it on every briefing turned it
+    # into wallpaper — and a metric you have stopped reading is worse than one
+    # you have to go and look at.
+    _ = (calibration_verdict, calibration_detail)
 
     if eligible:
         out += [THIN,
