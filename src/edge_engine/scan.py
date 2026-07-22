@@ -384,9 +384,12 @@ class Engine:
                 log.debug("duplicate within window: %s", signal.title[:40])
                 continue
 
-            if signal.advisory:
-                # Deliver unsized. It is a research prompt, and forcing a stake
-                # onto it would dress a "go look at this" up as a "buy this".
+            if signal.advisory or self.bankroll.is_paper_mode:
+                # Advisory signals carry no forecast to size. Paper mode is the
+                # other case: below the practical minimum the analysis is still
+                # worth reading, but printing a stake figure while telling the
+                # operator not to use it works against the whole point of
+                # proving the edge before funding it.
                 signal.stake = None
                 signal.contracts = None
             else:

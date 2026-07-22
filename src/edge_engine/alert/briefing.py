@@ -166,6 +166,14 @@ def render_play(signal: Signal, index: Optional[int], solo: bool = False) -> lis
             "<i>Screened wallets are positioned here. That is a reason to look, "
             "not a reason to bet.</i>",
         ]
+    elif signal.stake is None:
+        # Paper mode. The analysis stands; the stake is withheld deliberately.
+        lines += [
+            "",
+            "<b>NO STAKE — paper mode</b>",
+            "<i>Log it with /took or /skip to build the record. Stakes return "
+            "once the bankroll can support a real position.</i>",
+        ]
     elif signal.stake:
         win = payout(signal.stake, market)
         lines += [

@@ -240,6 +240,31 @@ class TestPaperMode:
         engine.set_bankroll("c", 77.0)
         assert "$500.00" in build_briefing([], engine.state, DAILY)
 
+    def test_paper_mode_actually_withholds_the_stake(self, engine):
+        """It must GATE, not just warn.
+
+        The first version printed a warning and then handed over a fully-sized
+        order ticket anyway — a banner telling you not to use the number
+        directly beside the number.
+        """
+        engine.set_bankroll("c", 77.0)
+        kept = engine._apply_discipline([_signal(0.20, 2.0, "Arb", det=True)])
+        assert len(kept) == 1, "the signal should still be shown"
+        assert kept[0].stake is None, "paper mode did not withhold the stake"
+        assert kept[0].contracts is None
+
+    def test_stakes_return_above_the_threshold(self, engine):
+        engine.set_bankroll("c", 2500.0)
+        kept = engine._apply_discipline([_signal(0.20, 2.0, "Arb", det=True)])
+        assert kept[0].stake and kept[0].stake > 0
+
+    def test_card_says_why_the_stake_is_missing(self, engine):
+        engine.set_bankroll("c", 77.0)
+        kept = engine._apply_discipline([_signal(0.20, 2.0, "Arb", det=True)])
+        text = build_briefing(kept, engine.state, DAILY)
+        assert "paper mode" in text.lower()
+        assert "/took" in text
+
     def test_config_exposes_the_state(self, engine):
         engine.set_bankroll("c", 77.0)
         assert engine.bankroll.is_paper_mode
