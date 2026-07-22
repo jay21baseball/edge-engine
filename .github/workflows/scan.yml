@@ -1,0 +1,65 @@
+name: edge-engine scan
+
+# Runs in GitHub's cloud - your PC can be off. Alerts arrive on your phone.
+#
+# GitHub cron is best-effort and often fires 5-15 minutes late under load. That
+# is fine here: at a small bankroll the executable strategies do not turn over
+# fast enough for the difference to matter.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DATABASE_URL        Supabase connection string (Session pooler, port 5432)
+#   TELEGRAM_BOT_TOKEN  from @BotFather
+#   TELEGRAM_CHAT_ID    from `python -m edge_engine.setup_telegram`
+#   ODDS_API_KEY        optional, for the sportsbook divergence strategy
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"      # market scan
+    - cron: "17 */6 * * *"      # wallet rescore, offset to avoid collisions
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Command to run"
+        required: true
+        default: scan
+        type: choice
+        options: [scan, wallets, status]
+
+concurrency:
+  group: edge-engine-scan
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install --quiet pyyaml "psycopg[binary]"
+
+      - name: Decide command
+        id: pick
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "cmd=${{ inputs.command }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "17 */6 * * *" ]; then
+            echo "cmd=wallets" >> "$GITHUB_OUTPUT"
+          else
+            echo "cmd=scan" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run ${{ steps.pick.outputs.cmd }}
+        env:
+          PYTHONPATH: src
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python -m edge_engine.scan ${{ steps.pick.outputs.cmd }}

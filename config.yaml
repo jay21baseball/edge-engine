@@ -1,0 +1,85 @@
+# edge-engine configuration
+#
+# Everything derives from `bankroll`. Change that one number and unit sizes,
+# edge thresholds, trade caps and strategy availability all move with it.
+
+# ---------------------------------------------------------------- bankroll
+bankroll: 2500.0
+
+# Quarter Kelly. Full Kelly is optimal only if you KNOW the probability; you are
+# estimating it, and Kelly punishes optimistic estimates asymmetrically -
+# overbetting 2x turns a real edge into long-run ruin.
+kelly_fraction: 0.25
+
+max_single_position_pct: 5.0
+max_concurrent_exposure_pct: 40.0
+
+# Edge floor. Scales DOWN automatically as bankroll grows (see
+# BankrollConfig.effective_min_edge). At $2,500 the effective floor is 4%;
+# at $25k+ it drops to 2%. Small stacks need a HIGHER bar, not a lower one -
+# fixed costs are a bigger fraction and there is less cushion for variance.
+min_edge_threshold_pct: 4.0
+
+# Three is deliberate. More trades per day means worse trades per day.
+max_trades_per_day: 3
+
+# Down this much in a week and the system stops issuing buy alerts entirely.
+# This rule works precisely when you least want it to.
+drawdown_circuit_breaker_pct: 15.0
+
+# ----------------------------------------------------------------- alerts
+#
+# DO NOT PUT SECRETS IN THIS FILE. It is tracked by git and will be pushed.
+#
+# Supply them as environment variables instead - the loader reads these and
+# they override anything here:
+#
+#   $env:TELEGRAM_BOT_TOKEN = '...'      (PowerShell, this session only)
+#   $env:TELEGRAM_CHAT_ID   = '...'
+#
+# For a permanent local setting use secrets.local.ps1 (gitignored):
+#   copy secrets.local.example.ps1 secrets.local.ps1   then edit and dot-source it
+#
+# In the cloud these come from GitHub Actions repository secrets.
+telegram_bot_token: null
+telegram_chat_id: null
+
+# ------------------------------------------------------------- sportsbook
+# Free key at https://the-odds-api.com. Set it as ODDS_API_KEY in the
+# environment (or a GitHub secret) - not here.
+#
+# Browse every available sport key with:   python -m edge_engine.scan sports
+# Then paste any key(s) into odds_sports below. Change them whenever you like;
+# it takes effect on the next scan with no code change.
+#
+# QUOTA MATH - this is the binding constraint:
+#   requests/month = (number of sports) x (43,200 / odds_refresh_minutes)
+#   Free tier is 500/month. 2 sports every 180 min = 480/month. Just inside.
+#
+# The `sports` command prints your exact usage and warns if you go over.
+#
+# HONEST TRADEOFF: this strategy's edge is that books move on injury news within
+# seconds while Polymarket takes minutes to hours. A 3-hourly refresh catches
+# slow divergence but NOT that news lag. Running it properly wants the paid tier
+# (~$30/mo for 20k requests, which allows a 15-minute refresh). Start free,
+# see whether the slow signals are real, and only then decide if it earns $30.
+odds_refresh_minutes: 180
+odds_sports:
+  - basketball_nba
+  - americanfootball_nfl
+
+# ---------------------------------------------------------------- storage
+# Leave null for local SQLite. Set to a Supabase connection string (or supply
+# DATABASE_URL in the environment) to run in the cloud with your PC off.
+store: null
+database_url: null
+
+# ---------------------------------------------------------------- scanning
+scan_interval_seconds: 300
+
+# Contracts per leg used when verifying an arb against real order-book depth.
+# Raise this as bankroll grows so the depth test matches the size you would
+# actually try to fill.
+target_contracts: 100
+
+db_path: data/edge.db

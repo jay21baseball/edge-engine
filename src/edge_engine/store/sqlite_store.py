@@ -1,0 +1,275 @@
+"""SQLite storage. The interface here IS the deploy seam.
+
+Everything downstream depends only on these method signatures, so promoting to
+Postgres later means writing one new class, not editing strategies.
+
+Snapshotting every market on every scan is deliberate and is the highest-return
+decision in the project: within weeks it becomes a historical price series for
+both venues that cannot be bought, and it is what makes backtesting and
+calibration possible at all.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+from ..ingest.models import Market, Venue
+from ..strategies.base import Signal
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS markets (
+    key TEXT PRIMARY KEY, venue TEXT, market_id TEXT, event_id TEXT,
+    title TEXT, category TEXT, close_ts TEXT, status TEXT,
+    fee_rate REAL, first_seen TEXT, last_seen TEXT
+);
+CREATE TABLE IF NOT EXISTS market_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT, ts TEXT, yes_bid REAL, yes_ask REAL, no_bid REAL, no_ask REAL,
+    volume REAL, liquidity REAL
+);
+CREATE INDEX IF NOT EXISTS ix_snap_key_ts ON market_snapshots(key, ts);
+
+CREATE TABLE IF NOT EXISTS events (
+    key TEXT PRIMARY KEY, venue TEXT, event_id TEXT, title TEXT,
+    category TEXT, mutually_exclusive INTEGER, neg_risk INTEGER, last_seen TEXT
+);
+
+CREATE TABLE IF NOT EXISTS wallet_scores (
+    address TEXT, ts TEXT, username TEXT, category TEXT, n_resolved INTEGER,
+    entry_adj_edge REAL, t_stat REAL, brier REAL, herfindahl REAL,
+    volume_to_pnl REAL, is_mm INTEGER, qualified INTEGER, disqualified_for TEXT,
+    PRIMARY KEY (address, ts)
+);
+CREATE TABLE IF NOT EXISTS wallet_positions (
+    address TEXT, market_id TEXT, side TEXT, size REAL, avg_price REAL,
+    current_price REAL, observed_ts TEXT,
+    PRIMARY KEY (address, market_id, side, observed_ts)
+);
+
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT, strategy TEXT, venue TEXT, market_id TEXT, title TEXT, side TEXT,
+    entry_price REAL, est_probability REAL, edge REAL, confidence REAL,
+    days_to_resolution REAL, score REAL, deterministic INTEGER,
+    category TEXT, stake REAL, contracts REAL,
+    legs TEXT, rationale TEXT, counter_case TEXT, alerted INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_signals_ts ON signals(ts);
+
+CREATE TABLE IF NOT EXISTS journal (
+    signal_id INTEGER PRIMARY KEY,
+    alerted_ts TEXT, taken INTEGER DEFAULT 0, actual_entry REAL, stake REAL,
+    outcome REAL, pnl REAL, resolved_ts TEXT, notes TEXT,
+    FOREIGN KEY (signal_id) REFERENCES signals(id)
+);
+
+CREATE TABLE IF NOT EXISTS cross_venue_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT, kalshi_id TEXT, poly_id TEXT, title TEXT,
+    gross_spread REAL, net_after_fees REAL, depth_available REAL, confirmed INTEGER
+);
+"""
+
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+class SqliteStore:
+    def __init__(self, path: str | Path = "data/edge.db"):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as conn:
+            conn.executescript(SCHEMA)
+
+    @contextmanager
+    def connect(self):
+        conn = sqlite3.connect(self.path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------- ingestion
+
+    def upsert_markets(self, markets: Iterable[Market]) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = list(markets)
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT INTO markets (key, venue, market_id, event_id, title,
+                       category, close_ts, status, fee_rate, first_seen, last_seen)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET
+                       title=excluded.title, status=excluded.status,
+                       close_ts=excluded.close_ts, last_seen=excluded.last_seen""",
+                [(m.key, m.venue.value, m.market_id, m.event_id, m.title, m.category,
+                  _iso(m.close_ts), m.status, m.fee_rate, now, now) for m in rows],
+            )
+            conn.executemany(
+                """INSERT INTO market_snapshots
+                       (key, ts, yes_bid, yes_ask, no_bid, no_ask, volume, liquidity)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                [(m.key, now, m.yes_bid, m.yes_ask, m.no_bid, m.no_ask,
+                  m.volume, m.liquidity) for m in rows],
+            )
+        return len(rows)
+
+    def upsert_events(self, events: Iterable[Any]) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = list(events)
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT INTO events (key, venue, event_id, title, category,
+                       mutually_exclusive, neg_risk, last_seen)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen""",
+                [(f"{e.venue.value}:{e.event_id}", e.venue.value, e.event_id, e.title,
+                  e.category, int(e.mutually_exclusive), int(e.neg_risk), now)
+                 for e in rows],
+            )
+        return len(rows)
+
+    def save_wallet_scores(self, scores: Iterable[Any]) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = list(scores)
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO wallet_scores
+                   (address, ts, username, category, n_resolved, entry_adj_edge,
+                    t_stat, brier, herfindahl, volume_to_pnl, is_mm, qualified,
+                    disqualified_for)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(s.address, now, s.username, s.category, s.n_resolved,
+                  s.entry_adjusted_edge, s.t_stat, s.brier, s.pnl_herfindahl,
+                  None if s.volume_to_pnl == float("inf") else s.volume_to_pnl,
+                  int(s.is_market_maker), int(s.qualified),
+                  json.dumps(s.disqualified_for)) for s in rows],
+            )
+        return len(rows)
+
+    # --------------------------------------------------------------- signals
+
+    def save_signal(self, signal: Signal) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO signals (ts, strategy, venue, market_id, title, side,
+                       entry_price, est_probability, edge, confidence,
+                       days_to_resolution, score, deterministic, category,
+                       stake, contracts, legs, rationale, counter_case)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (signal.ts.isoformat(), signal.strategy, signal.venue.value,
+                 signal.market_id, signal.title, signal.side, signal.entry_price,
+                 signal.est_probability, signal.edge, signal.confidence,
+                 signal.days_to_resolution, signal.score, int(signal.deterministic),
+                 signal.category, signal.stake, signal.contracts,
+                 json.dumps([leg.__dict__ for leg in signal.legs], default=str),
+                 json.dumps(signal.rationale, default=str), signal.counter_case),
+            )
+            signal_id = cur.lastrowid
+            # Journal EVERY signal at issue time, taken or not. Logging untaken
+            # alerts is what separates "the model is bad" from "the model is fine
+            # and execution is bad" - opposite problems, opposite fixes.
+            conn.execute(
+                "INSERT OR IGNORE INTO journal (signal_id, alerted_ts) VALUES (?,?)",
+                (signal_id, signal.ts.isoformat()),
+            )
+        return signal_id
+
+    def mark_alerted(self, signal_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE signals SET alerted=1 WHERE id=?", (signal_id,))
+
+    def recent_signal_exists(self, strategy: str, market_id: str,
+                             within_hours: float = 12.0) -> bool:
+        """Suppress duplicate alerts for the same opportunity."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM signals
+                   WHERE strategy=? AND market_id=?
+                     AND ts > datetime('now', ?) LIMIT 1""",
+                (strategy, market_id, f"-{within_hours} hours"),
+            ).fetchone()
+        return row is not None
+
+    def log_cross_venue(self, ts, kalshi_id, poly_id, title, gross, net,
+                        depth) -> None:
+        """Observe-only. Never alerts, never sizes - just builds the dataset that
+        will eventually say whether cross-venue arb at this bankroll was real."""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO cross_venue_log (ts, kalshi_id, poly_id, title,
+                       gross_spread, net_after_fees, depth_available, confirmed)
+                   VALUES (?,?,?,?,?,?,?,0)""",
+                (ts, kalshi_id, poly_id, title, gross, net, depth),
+            )
+
+    # ----------------------------------------------------------- calibration
+
+    def resolve_signal(self, signal_id: int, outcome: float,
+                       pnl: Optional[float] = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE journal SET outcome=?, pnl=?, resolved_ts=?
+                   WHERE signal_id=?""",
+                (outcome, pnl, datetime.now(timezone.utc).isoformat(), signal_id),
+            )
+
+    def resolved_predictions(self) -> list[tuple[float, float]]:
+        """(predicted_probability, realized_outcome) for every resolved signal."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT s.est_probability, j.outcome
+                   FROM signals s JOIN journal j ON j.signal_id = s.id
+                   WHERE j.outcome IS NOT NULL"""
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows if r[0] is not None]
+
+    def qualified_wallets(self, max_age_hours: float = 24.0) -> list[str]:
+        """Addresses that passed every screen on the most recent scoring run."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT address, MAX(ts) FROM wallet_scores
+                   WHERE qualified = 1 AND ts > datetime('now', ?)
+                   GROUP BY address""",
+                (f"-{max_age_hours} hours",),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def wallet_score_age_hours(self) -> Optional[float]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT (julianday('now') - julianday(MAX(ts))) * 24 "
+                "FROM wallet_scores"
+            ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def latest_wallet_score(self, address: str) -> Optional[dict]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT username, category, n_resolved, entry_adj_edge, t_stat,
+                          brier, herfindahl, volume_to_pnl, qualified
+                   FROM wallet_scores WHERE address=? ORDER BY ts DESC LIMIT 1""",
+                (address,),
+            ).fetchone()
+        if not row or not row[8]:
+            return None
+        return {
+            "username": row[0], "category": row[1], "n_resolved": row[2],
+            "entry_adj_edge": row[3], "t_stat": row[4], "brier": row[5],
+            "herfindahl": row[6], "volume_to_pnl": row[7],
+        }
+
+    def counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            return {
+                t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in ("markets", "market_snapshots", "events", "signals",
+                          "wallet_scores", "cross_venue_log")
+            }

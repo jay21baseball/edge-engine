@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/
+*.db
+.venv/
+venv/
+config.local.yaml
+secrets.local.ps1
+secrets.local.sh
+.env
