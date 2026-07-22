@@ -103,6 +103,42 @@ class SqliteStore:
 
     # ------------------------------------------------------------- ingestion
 
+    def _changed_only(self, conn, rows: list[Market]) -> list[Market]:
+        """Drop markets whose quote is unchanged since the last snapshot.
+
+        Snapshotting all ~88k markets every scan is unbounded: at 15-minute
+        scans that is ~8M rows/day and the database reached 2.2 GB in a single
+        day of testing — past the entire Supabase free tier. The overwhelming
+        majority of markets do not move between scans, so storing an identical
+        row is pure cost with no analytical value. Only actual price changes
+        are recorded, which is also what a price series should contain.
+        """
+        latest = {
+            r[0]: (r[1], r[2], r[3], r[4])
+            for r in conn.execute(
+                """SELECT key, yes_bid, yes_ask, no_bid, no_ask
+                   FROM market_snapshots
+                   WHERE id IN (SELECT MAX(id) FROM market_snapshots GROUP BY key)"""
+            ).fetchall()
+        }
+        changed = []
+        for m in rows:
+            previous = latest.get(m.key)
+            current = (m.yes_bid, m.yes_ask, m.no_bid, m.no_ask)
+            if previous is None or previous != current:
+                changed.append(m)
+        return changed
+
+    def prune_snapshots(self, keep_days: float = 90.0) -> int:
+        """Drop snapshots older than the retention window."""
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM market_snapshots WHERE ts < datetime('now', ?)",
+                (f"-{keep_days} days",),
+            )
+            deleted = cur.rowcount
+        return max(deleted, 0)
+
     def upsert_markets(self, markets: Iterable[Market]) -> int:
         now = datetime.now(timezone.utc).isoformat()
         rows = list(markets)
@@ -117,12 +153,13 @@ class SqliteStore:
                 [(m.key, m.venue.value, m.market_id, m.event_id, m.title, m.category,
                   _iso(m.close_ts), m.status, m.fee_rate, now, now) for m in rows],
             )
+            changed = self._changed_only(conn, rows)
             conn.executemany(
                 """INSERT INTO market_snapshots
                        (key, ts, yes_bid, yes_ask, no_bid, no_ask, volume, liquidity)
                    VALUES (?,?,?,?,?,?,?,?)""",
                 [(m.key, now, m.yes_bid, m.yes_ask, m.no_bid, m.no_ask,
-                  m.volume, m.liquidity) for m in rows],
+                  m.volume, m.liquidity) for m in changed],
             )
         return len(rows)
 

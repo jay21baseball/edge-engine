@@ -116,14 +116,35 @@ class PostgresStore:
                 [(m.key, m.venue.value, m.market_id, m.event_id, m.title, m.category,
                   m.close_ts, m.status, m.fee_rate, now, now) for m in rows],
             )
+            # Only store quotes that actually moved. Writing all ~88k markets
+            # every scan is ~8M rows/day and exceeds the Supabase free tier in
+            # under an hour. See SqliteStore._changed_only.
+            cur.execute(
+                """SELECT DISTINCT ON (key) key, yes_bid, yes_ask, no_bid, no_ask
+                   FROM market_snapshots ORDER BY key, ts DESC"""
+            )
+            latest = {r[0]: (r[1], r[2], r[3], r[4]) for r in cur.fetchall()}
+            changed = [
+                m for m in rows
+                if latest.get(m.key) != (m.yes_bid, m.yes_ask, m.no_bid, m.no_ask)
+            ]
             cur.executemany(
                 """INSERT INTO market_snapshots
                        (key, ts, yes_bid, yes_ask, no_bid, no_ask, volume, liquidity)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 [(m.key, now, m.yes_bid, m.yes_ask, m.no_bid, m.no_ask,
-                  m.volume, m.liquidity) for m in rows],
+                  m.volume, m.liquidity) for m in changed],
             )
         return len(rows)
+
+    def prune_snapshots(self, keep_days: float = 90.0) -> int:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM market_snapshots "
+                "WHERE ts < NOW() - (%s || ' days')::INTERVAL",
+                (str(keep_days),),
+            )
+            return max(cur.rowcount, 0)
 
     def upsert_events(self, events: Iterable[Any]) -> int:
         now = datetime.now(timezone.utc)
