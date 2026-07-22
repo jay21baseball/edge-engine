@@ -223,6 +223,10 @@ class Engine:
 
         kept = self._apply_discipline(sorted(signals, key=lambda s: -s.score))
         self._last_events = events
+        # Shared across processes so the bot can reuse a fresh scan instead of
+        # running its own and timing out the Telegram reply.
+        self.store.set_state("_system", "last_scan_at",
+                             datetime.now(timezone.utc).isoformat())
         return kept
 
     def _odds_due(self, every_minutes: float) -> bool:
@@ -514,9 +518,23 @@ class Engine:
             self.set_bankroll(chat_id, float(stored))
 
     def minutes_since_scan(self) -> Optional[float]:
-        if self._last_scan_at is None:
+        """Age of the most recent scan, ACROSS processes.
+
+        The scanner and the bot are separate processes. An in-memory timestamp
+        is always None in the bot, so every command triggered a fresh 40-second
+        scan and Telegram timed out before the reply arrived. The scan time is
+        therefore recorded in the store, which both processes share.
+        """
+        stamp = self.store.get_state("_system", "last_scan_at")
+        if not stamp:
             return None
-        return (time.monotonic() - self._last_scan_at) / 60.0
+        try:
+            scanned = datetime.fromisoformat(str(stamp))
+        except ValueError:
+            return None
+        if scanned.tzinfo is None:
+            scanned = scanned.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - scanned).total_seconds() / 60.0
 
     def remember_briefing(self, chat_id: str, rows: list[dict], window) -> None:
         """Map the numbers shown in a briefing back to signal ids.

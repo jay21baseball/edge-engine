@@ -267,6 +267,39 @@ class TestCalibrationWording:
         assert "Cleared to scale" in report.detail()
 
 
+class TestCrossProcessScanAge:
+    """The scanner and bot are separate processes.
+
+    Regression: minutes_since_scan() read in-process memory, so it was always
+    None in the bot — every command kicked off a fresh 40-second scan and
+    Telegram timed out before the reply arrived. The user saw nothing at all.
+    """
+
+    def test_unscanned_store_reports_none(self, engine):
+        assert engine.minutes_since_scan() is None
+
+    def test_scan_time_is_visible_to_a_second_engine(self, engine, tmp_path):
+        from datetime import datetime, timezone
+        engine.store.set_state("_system", "last_scan_at",
+                               datetime.now(timezone.utc).isoformat())
+        # A separate Engine over the same store == the bot process.
+        config = load_config("does-not-exist.yaml")
+        config["db_path"] = engine.config["db_path"]
+        other = Engine(config)
+        age = other.minutes_since_scan()
+        assert age is not None and age < 1.0
+
+    def test_stale_scan_reports_a_large_age(self, engine):
+        from datetime import datetime, timedelta, timezone
+        old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        engine.store.set_state("_system", "last_scan_at", old)
+        assert engine.minutes_since_scan() > 170
+
+    def test_corrupt_timestamp_is_treated_as_no_scan(self, engine):
+        engine.store.set_state("_system", "last_scan_at", "not-a-date")
+        assert engine.minutes_since_scan() is None
+
+
 class TestSignalRoundTrip:
     """Regression: recent_signals omitted id, market_id, and score, so the bot
     could not rehydrate a Signal and /took had nothing to point at."""
