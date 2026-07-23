@@ -92,6 +92,10 @@ whales:
     username: swisstony
     min_usdc: 250
 
+# Trades at or above this dollar amount get a distinct, louder "BIG MONEY"
+# alert - the ones actually worth stopping for. Per-whale big_usdc overrides it.
+whale_big_usdc: 10000
+
 # Shared bot for all whales that do not set their own. Leave null to use the
 # main bot. To give the whale feed its own bot: create one via @BotFather,
 # message it once, put its token here and your chat id below.

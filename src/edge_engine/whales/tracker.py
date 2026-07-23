@@ -25,12 +25,16 @@ from zoneinfo import ZoneInfo
 log = logging.getLogger(__name__)
 
 
+BIG_TRADE_USDC = 10000.0     # trades this size get a distinct, louder alert
+
+
 @dataclass
 class Whale:
     name: str
     address: str
     username: str = ""                 # for the polymarket.com/@ link
     min_usdc: float = 0.0              # ignore trades smaller than this
+    big_usdc: float = BIG_TRADE_USDC  # the "big money" threshold
     bot_token: Optional[str] = None    # a dedicated bot for this whale, optional
     chat_id: Optional[str] = None
 
@@ -55,6 +59,8 @@ def load_whales(config: dict) -> list[Whale]:
             address=str(w["address"]),
             username=w.get("username", ""),
             min_usdc=float(w.get("min_usdc", 0)),
+            big_usdc=float(w.get("big_usdc",
+                                 config.get("whale_big_usdc", BIG_TRADE_USDC))),
             bot_token=w.get("bot_token"),
             chat_id=str(w.get("chat_id")) if w.get("chat_id") else None,
         ))
@@ -93,13 +99,39 @@ def _size_word(usdc: float) -> str:
 
 def format_trade(whale: Whale, trade: dict, portfolio: Optional[float] = None,
                  tz_name: str = "America/New_York") -> str:
-    """A single trade, written like a friend telling you what they just saw."""
+    """A single trade, written like a friend telling you what they just saw.
+
+    A trade at or above the whale's big threshold gets a distinctly louder,
+    separate message - the $10k+ bets are the ones actually worth stopping for.
+    """
     side = trade["side"].upper()
     verb = "bought" if side == "BUY" else "sold"
     outcome = trade["outcome"] or "a position"
     market = trade["title"] or ""
     usdc = trade["usdc"]
     price = trade["price"]
+
+    if usdc >= whale.big_usdc:
+        lines = [
+            f"BIG MONEY. {whale.name} just {verb} {_money(usdc)}.",
+            "",
+            f"He {verb} {outcome} at {_cents(price)}, {trade['size']:,.0f} "
+            f"shares.",
+        ]
+        if market and market.lower() not in outcome.lower():
+            lines.append(f"Market: {market}")
+        lines.append(f"Around {_clock(trade['ts'], tz_name)}.")
+        if portfolio:
+            lines += ["", f"His whole book is about {_money(portfolio)}."]
+        lines += [
+            "",
+            f"{whale.link}",
+            "",
+            "This is one of his big ones, so it is worth a real look. Still: "
+            "his fill already moved the price and you cannot see his hedge, so "
+            "check it yourself before you follow.",
+        ]
+        return "\n".join(lines)
 
     lines = [
         f"{whale.name} just {verb} something.",

@@ -95,6 +95,8 @@ def load_config(path: str = "config.yaml") -> dict[str, Any]:
     for env_key, config_key, cast in (
         ("TELEGRAM_BOT_TOKEN", "telegram_bot_token", str),
         ("TELEGRAM_CHAT_ID", "telegram_chat_id", str),
+        ("WHALE_BOT_TOKEN", "whale_bot_token", str),
+        ("WHALE_CHAT_ID", "whale_chat_id", str),
         ("ODDS_API_KEY", "odds_api_key", str),
         ("EDGE_BANKROLL", "bankroll", float),
     ):
@@ -470,26 +472,55 @@ class Engine:
 
     # ---------------------------------------------------------------- whales
 
-    def watch_whales(self, interval: int = 45) -> None:
-        """Poll every tracked wallet's trades and alert on new ones.
-
-        Each whale can route to its own Telegram bot (a dedicated feed), and
-        falls back to a shared whale bot, then the main bot. Free - it only
-        reads Polymarket's public activity feed.
-        """
+    def _whale_setup(self):
         from .whales.tracker import WhaleTracker, load_whales
-
         whales = load_whales(self.config)
-        if not whales:
-            log.warning("no whales configured - add them to config.yaml")
-            return
         tracker = WhaleTracker(self.poly, self.store)
         main_token = self.config.get("telegram_bot_token")
         main_chat = self.config.get("telegram_chat_id")
         shared_token = self.config.get("whale_bot_token") or main_token
         shared_chat = self.config.get("whale_chat_id") or main_chat
+        return whales, tracker, shared_token, shared_chat
 
-        # Prime once so a restart does not replay history as fresh alerts.
+    def _whale_poll(self, whales, tracker, shared_token, shared_chat) -> int:
+        """One pass over every wallet. Returns how many alerts were sent."""
+        sent = 0
+        for w in whales:
+            alerts = tracker.check(w)
+            if not alerts:
+                continue
+            token = w.bot_token or shared_token
+            chat = w.chat_id or shared_chat
+            for text in alerts:
+                self._send_to(token, chat, text)
+            sent += len(alerts)
+            log.info("whale %s: %d new trade(s) alerted", w.name, len(alerts))
+        return sent
+
+    def poll_whales_once(self) -> int:
+        """A single poll, for the cloud cron - runs with your PC off.
+
+        Deliberately does NOT prime: the very first cloud run auto-primes (the
+        seen set is empty, so it records without alerting), and every run after
+        alerts on genuinely new trades. Latency is the cron interval (~5 min)
+        rather than the 45s of the local loop, which is the honest cost of not
+        needing a machine on.
+        """
+        whales, tracker, token, chat = self._whale_setup()
+        if not whales:
+            log.warning("no whales configured")
+            return 0
+        sent = self._whale_poll(whales, tracker, token, chat)
+        log.info("whale poll: %d wallet(s), %d alert(s)", len(whales), sent)
+        return sent
+
+    def watch_whales(self, interval: int = 45) -> None:
+        """Fast local loop - 45s polling while your PC is on."""
+        whales, tracker, token, chat = self._whale_setup()
+        if not whales:
+            log.warning("no whales configured - add them to config.yaml")
+            return
+        # Prime once so a local restart does not replay history as fresh alerts.
         for w in whales:
             tracker.check(w, prime=True)
         log.info("whale tracker: %d wallets, every %ds. ctrl-c to stop.",
@@ -498,16 +529,7 @@ class Engine:
         pruned = 0.0
         while True:
             try:
-                for w in whales:
-                    alerts = tracker.check(w)
-                    if not alerts:
-                        continue
-                    token = w.bot_token or shared_token
-                    chat = w.chat_id or shared_chat
-                    for text in alerts:
-                        self._send_to(token, chat, text)
-                    log.info("whale %s: %d new trade(s) alerted",
-                             w.name, len(alerts))
+                self._whale_poll(whales, tracker, token, chat)
                 if time.monotonic() - pruned > 3600:
                     self.store.prune_whale_trades(keep_days=30)
                     pruned = time.monotonic()
@@ -716,7 +738,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("command",
                         choices=["scan", "watch", "wallets", "status", "sports",
                                  "signals", "bot", "live", "livestats",
-                                 "whales"])
+                                 "whales", "whalepoll"])
     parser.add_argument("--interval", type=int, default=60,
                         help="live: seconds between polls")
     parser.add_argument("--all", action="store_true",
@@ -766,6 +788,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.command == "whales":
         engine.watch_whales(interval=max(args.interval, 20))
+        return 0
+
+    if args.command == "whalepoll":
+        engine.poll_whales_once()
         return 0
 
     if args.command == "bot":
