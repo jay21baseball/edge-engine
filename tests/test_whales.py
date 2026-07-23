@@ -41,17 +41,17 @@ class FakePoly:
 class TestBigMoneyMessage:
     def test_big_trade_gets_the_loud_message(self):
         text = format_trade(_tony(), _trade("h1", 15000))
-        assert "BIG MONEY" in text
+        assert "big one" in text.lower()
         assert "$15,000" in text
-        assert "one of his big ones" in text
+        assert "bets this heavy" in text
 
     def test_normal_trade_gets_the_normal_message(self):
         text = format_trade(_tony(), _trade("h1", 1500))
-        assert "BIG MONEY" not in text
+        assert "big one" not in text.lower()
         assert "$1,500" in text
 
     def test_threshold_is_inclusive(self):
-        assert "BIG MONEY" in format_trade(_tony(), _trade("h1", 10000))
+        assert "big one" in format_trade(_tony(), _trade("h1", 10000)).lower()
 
     def test_message_is_plain_no_special_chars(self):
         text = format_trade(_tony(), _trade("h1", 12000))
@@ -127,4 +127,4 @@ class TestSingleShotPoll:
                             lambda a, limit=40: [_trade("h2", 30000),
                                                  _trade("h1", 12000)])
         assert engine.poll_whales_once() == 1        # new big trade alerts
-        assert "BIG MONEY" in sent[0]
+        assert "big one" in sent[0].lower()

@@ -65,26 +65,26 @@ WEEKLY = BriefingWindow("this week", max_days=10.0, max_plays=WEEKLY_MAX_PLAYS,
 def _greeting(now: datetime) -> str:
     h = now.hour
     if h < 12:
-        return "Morning."
+        return "Morning"
     if h < 18:
-        return "Afternoon."
-    return "Evening."
+        return "Afternoon"
+    return "Evening"
 
 
 def _header(window: BriefingWindow, state: DisciplineState,
             now: Optional[datetime] = None) -> list[str]:
     now = now or datetime.now(timezone.utc)
     config = state.config
-    lines = [f"{_greeting(now)} Here's what I've got for {window.name}.", ""]
+    lines = [f"{_greeting(now)}. Here's the good shit for {window.name}.", ""]
     if config.is_paper_mode:
         lines += _paper_mode_notice(config)
     else:
         risk = (f"nothing at risk yet" if state.current_exposure <= 0
-                else f"{money(state.current_exposure)} at risk")
+                else f"{money(state.current_exposure)} on the table")
         lines += [
-            f"You're working with {money(config.bankroll)}, unit size "
+            f"You're sitting on {money(config.bankroll)}, unit size "
             f"{money(config.unit_size())}. {state.trades_today} trades in "
-            f"today, {risk}.",
+            f"today, {risk}. Let's find something.",
             "",
         ]
     return lines
@@ -95,14 +95,14 @@ def _paper_mode_notice(config) -> list[str]:
     return [
         f"You're on {money(config.bankroll)}, so we're in paper mode. I'll give "
         f"you the full read on everything, but I'm holding the bet sizes back "
-        f"until real money makes sense.",
-        f"Your unit would be {money(config.unit_size())}, so a strong 5% edge "
-        f"is only about {money(per_trade)} a trade, and Polymarket won't even "
-        f"take an order under 5 shares. Real sizing kicks in around "
-        f"{money(config.bankroll_for_live)}.",
+        f"until there's real money to work with.",
+        f"Your unit would be {money(config.unit_size())}, so even a strong 5% "
+        f"edge is only about {money(per_trade)} a trade. That's not worth a "
+        f"damn against the fees, and Polymarket won't even take an order under "
+        f"5 shares. Real sizing kicks in around {money(config.bankroll_for_live)}.",
         "",
         "Still log everything with /took and /skip. That's how we find out if "
-        "any of this actually works before a dollar is on the line.",
+        "any of this actually works before a dollar's on the line.",
         "",
     ]
 
@@ -113,8 +113,9 @@ def _stand_down(state: DisciplineState) -> list[str]:
         f"the week started, past the {state.config.drawdown_circuit_breaker_pct:.0f}"
         f"% line I won't let you trade through.",
         "",
-        "This always feels wrong in the moment, and that's exactly when it's "
-        "doing its job. Back at it next week.",
+        "I know it feels wrong as hell to stop when you want to win it back. "
+        "That urge is exactly why this rule exists. Take the week, come back "
+        "fresh.",
     ]
 
 
@@ -133,20 +134,22 @@ def render_play(signal: Signal, index: Optional[int], solo: bool = False) -> lis
     if signal.deterministic:
         r = signal.rationale
         lines.append(
-            f"This one's locked in. Buy every outcome and one has to pay. "
-            f"Costs about {money(r.get('cost_at_size'))} with "
+            f"This one's locked in, basically free money. Buy every outcome "
+            f"and one of them has to pay. Costs about "
+            f"{money(r.get('cost_at_size'))} with "
             f"{money(r.get('fees_at_size'))} in fees, and you're guaranteed "
             f"{money(r.get('guaranteed_payout') or r.get('net_profit'))} back. "
             f"Clean {signal.edge * 100:.1f}%, no guessing."
         )
     else:
         act = signal.side.upper()
-        line = (f"Bet {act}. It's trading at {price_line(market)}")
+        line = (f"Bet {act}. It's at {price_line(market)}")
         if not signal.advisory and fair and fair != market:
-            line += (f", but I've got fair value nearer {price_line(fair)} "
-                     f"- about {edge_points(fair, market):+.0f} points your way.")
+            line += (f", but I've got fair value closer to {price_line(fair)}, "
+                     f"so that's about {edge_points(fair, market):+.0f} points "
+                     f"in your favor. Not bad.")
         else:
-            line += f", roughly {signal.edge * 100:+.1f}% of edge on my read."
+            line += f", and I read it around {signal.edge * 100:+.1f}% of edge."
         lines.append(line)
 
     if signal.advisory:
@@ -247,8 +250,8 @@ def build_briefing(signals: list[Signal], state: DisciplineState,
     _ = (calibration_verdict, calibration_detail)
 
     if eligible:
-        out += ["Reply /took 1 if you take it, /skip 1 if you pass, or "
-                "/explain 1 for the full read."]
+        out += ["Hit me with /took 1 if you jump on it, /skip 1 if you pass, "
+                "or /explain 1 for the whole breakdown."]
     return "\n".join(out)
 
 
@@ -264,8 +267,9 @@ def _nothing(beyond: list[Signal], window: BriefingWindow) -> list[str]:
             f"{window.next_view} if you want to see them.")
     else:
         lines.append(
-            "That's normal, honestly. Most days are quiet, and a system that "
-            "finds a play every single day isn't finding an edge, it's lowering "
-            "the bar. I'll text you the second something real shows up.")
+            "That's normal as hell, honestly. Most days are quiet, and any "
+            "system swearing it's got a play every single day is full of it, "
+            "just lowering the bar. I'll ping you the second something real "
+            "shows up.")
     lines.append("")
     return lines

@@ -188,8 +188,9 @@ def format_alert(decision: AlertDecision) -> str:
     from .format import american_str, cents, horizon, money
 
     signal = decision.signal
-    opener = ("Locked arb just showed up." if signal.deterministic
-              else "Something big just cleared the bar.")
+    opener = ("Yo, locked arb just popped. Free money if you're quick."
+              if signal.deterministic
+              else "Heads up, something real just cleared the bar.")
 
     lines = [
         opener, "",
@@ -203,7 +204,7 @@ def format_alert(decision: AlertDecision) -> str:
         lines.append(f"Bet {act} on {signal.venue.value.title()} at "
                      f"{american_str(signal.entry_price)} "
                      f"({cents(signal.entry_price)}). About "
-                     f"{signal.edge * 100:+.1f}% of edge.")
+                     f"{signal.edge * 100:+.1f}% edge.")
     if signal.stake:
         lines.append(f"Size it around {money(signal.stake)}.")
     lines.append(f"Settles {horizon(signal.days_to_resolution)}.")

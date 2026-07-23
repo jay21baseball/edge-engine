@@ -210,21 +210,21 @@ def cmd_took(engine, chat_id, args, reply=None) -> str:
     engine.state.trades_today += 1
 
     quoted = row.get("entry_price") or 0
-    lines = [f"<b>Logged as taken.</b> {row.get('title', '')[:60]}"]
+    lines = [f"Hell yeah, got it. Logged you in on {row.get('title', '')[:55]}."]
     if entry:
         slip = (entry - quoted) * 100
-        lines.append(f"<code>Filled {cents(entry)} vs quoted {cents(quoted)} "
-                     f"({slip:+.1f} pts)</code>")
+        lines.append(f"Filled at {cents(entry)}, quote was {cents(quoted)} "
+                     f"({slip:+.1f} pts).")
         if slip > 2:
-            lines.append("<i>That is meaningful slippage. If it keeps "
-                         "happening, the edge is decaying before you can act "
-                         "and the alert threshold should rise.</i>")
+            lines.append("That's a chunk of slippage. If it keeps happening the "
+                         "edge is gone before you can grab it, and I'll want to "
+                         "raise the bar.")
     lines += [
-        f"<code>Trades today {engine.state.trades_today}/"
-        f"{engine.bankroll.max_trades_per_day}</code>",
+        f"That's {engine.state.trades_today} of "
+        f"{engine.bankroll.max_trades_per_day} trades today.",
         "",
-        f"When it settles: <code>/result {args[0]} win</code> or "
-        f"<code>/result {args[0]} loss</code>",
+        f"When it settles, hit me with /result {args[0]} win or "
+        f"/result {args[0]} loss.",
     ]
     return "\n".join(lines)
 
@@ -234,11 +234,10 @@ def cmd_skip(engine, chat_id, args, reply=None) -> str:
     if error:
         return error
     engine.store.record_decision(signal_id, False)
-    return ("<b>Logged as passed.</b>\n\n"
-            "<i>Recording passes matters as much as recording takes — it is "
-            "the only way to tell whether the model is wrong or whether it is "
-            "fine and simply not being executed. Opposite problems, opposite "
-            "fixes.</i>")
+    return ("Cool, logged as passed. And good on ya for logging it. Tracking "
+            "the passes matters just as much as the bets. It's the only way to "
+            "tell if the model's wrong or if it's fine and just not being "
+            "executed. Totally different problems.")
 
 
 def cmd_result(engine, chat_id, args, reply=None) -> str:
@@ -246,10 +245,10 @@ def cmd_result(engine, chat_id, args, reply=None) -> str:
     if error:
         return error
     if len(args) < 2:
-        return "Win or loss? e.g. <code>/result 1 win</code>"
+        return "Win or loss? Like /result 1 win"
     verdict = args[1].lower()
     if verdict not in ("win", "loss", "won", "lost", "w", "l"):
-        return "Say <code>win</code> or <code>loss</code>."
+        return "Just say win or loss."
     outcome = 1.0 if verdict.startswith("w") else 0.0
 
     row = engine.store.signal_by_id(signal_id)
@@ -260,11 +259,13 @@ def cmd_result(engine, chat_id, args, reply=None) -> str:
     engine.state.current_bankroll += pnl
 
     report = build_report(engine.store.resolved_predictions())
+    head = (f"Let's go, that's a win. {money(pnl)}." if outcome
+            else f"Damn, that one lost. {money(pnl)}. It happens, on to the next.")
     return "\n".join([
-        f"<b>Recorded: {'WIN' if outcome else 'LOSS'}</b>  {money(pnl)}",
-        f"<code>Bankroll {money(engine.state.current_bankroll)}</code>",
+        head,
+        f"Bankroll's at {money(engine.state.current_bankroll)} now.",
         "",
-        f"<i>{report.verdict()}</i>",
+        report.verdict(),
     ])
 
 
@@ -274,24 +275,24 @@ def cmd_scorecard(engine, chat_id, args, reply=None) -> str:
     alerted = card.get("alerted") or 0
     taken = card.get("taken") or 0
     lines = [
-        "<b>SCORECARD</b>", "─" * 22,
-        f"<code>ALERTED    {alerted}</code>",
-        f"<code>TAKEN      {taken}</code>",
-        f"<code>PASSED     {card.get('passed') or 0}</code>",
-        f"<code>RESOLVED   {card.get('resolved') or 0}</code>",
-        f"<code>NET P&L    {money(card.get('pnl') or 0)}</code>",
+        "Here's your SCORECARD.",
         "",
-        "<b>TRACK RECORD</b>",
-        f"<code>{report.verdict()}</code>",
-        f"<i>{report.detail()}</i>",
+        f"Alerted: {alerted}",
+        f"Taken: {taken}",
+        f"Passed: {card.get('passed') or 0}",
+        f"Resolved: {card.get('resolved') or 0}",
+        f"Net P&L: {money(card.get('pnl') or 0)}",
+        "",
+        f"Track record: {report.verdict()}",
+        report.detail(),
     ]
     if report.n:
         lines += ["", f"<pre>{report.reliability_table()}</pre>"]
     if alerted and taken / max(alerted, 1) < 0.15 and alerted >= 10:
-        lines += ["", "<i>You are acting on under 15% of alerts. Either the "
-                       "threshold is too loose, or the edge is decaying before "
-                       "you can act. Both are fixable, but they need opposite "
-                       "fixes — /explain a few you passed on.</i>"]
+        lines += ["", "You're only pulling the trigger on under 15% of what I "
+                       "flag. Either the bar's too loose or the edge is gone "
+                       "before you act, and those need opposite fixes. Run "
+                       "/whynot and /explain a few you passed on."]
     return "\n".join(lines)
 
 

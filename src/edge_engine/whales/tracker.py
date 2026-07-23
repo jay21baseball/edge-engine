@@ -113,7 +113,7 @@ def format_trade(whale: Whale, trade: dict, portfolio: Optional[float] = None,
 
     if usdc >= whale.big_usdc:
         lines = [
-            f"BIG MONEY. {whale.name} just {verb} {_money(usdc)}.",
+            f"Yo. {whale.name} just dropped {_money(usdc)}. This is a big one.",
             "",
             f"He {verb} {outcome} at {_cents(price)}, {trade['size']:,.0f} "
             f"shares.",
@@ -122,35 +122,34 @@ def format_trade(whale: Whale, trade: dict, portfolio: Optional[float] = None,
             lines.append(f"Market: {market}")
         lines.append(f"Around {_clock(trade['ts'], tz_name)}.")
         if portfolio:
-            lines += ["", f"His whole book is about {_money(portfolio)}."]
+            lines += ["", f"Dude's whole book is about {_money(portfolio)}."]
         lines += [
             "",
             f"{whale.link}",
             "",
-            "This is one of his big ones, so it is worth a real look. Still: "
-            "his fill already moved the price and you cannot see his hedge, so "
-            "check it yourself before you follow.",
+            "When he bets this heavy it's worth a real look. But his fill "
+            "already moved the price and you can't see his hedge, so do your "
+            "own check before you follow him in.",
         ]
         return "\n".join(lines)
 
     lines = [
-        f"{whale.name} just {verb} something.",
+        f"{whale.name} just made a move.",
         "",
         f"{_size_word(usdc)}: {verb} {_money(usdc)} of {outcome} at {_cents(price)}.",
     ]
     if market and market.lower() not in outcome.lower():
         lines.append(f"Market: {market}")
-    lines.append(f"That is {trade['size']:,.0f} shares, around "
+    lines.append(f"That's {trade['size']:,.0f} shares, around "
                  f"{_clock(trade['ts'], tz_name)}.")
     if portfolio:
-        lines += ["", f"His book is worth about {_money(portfolio)} right now."]
+        lines += ["", f"His book's worth about {_money(portfolio)} right now."]
     lines += [
         "",
         f"{whale.link}",
         "",
-        "Heads up though: his fill already moved the price, and you cannot see "
-        "the other side of his book. Treat it as a tip to go look, not a green "
-        "light.",
+        "Heads up though, his fill already moved the price and you can't see "
+        "the other side of his book. It's a tip to go look, not a green light.",
     ]
     return "\n".join(lines)
 
