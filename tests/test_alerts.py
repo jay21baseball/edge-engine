@@ -152,21 +152,22 @@ class TestFormatting:
         decision = Alerter(engine.store).select([_arb()], "c", NOON)[0]
         text = format_alert(decision)
         assert len(text) < 1200
-        assert "LOCKED ARB" in text
+        assert "arb" in text.lower()
 
     def test_shows_american_odds(self, engine):
         decision = Alerter(engine.store).select([_book()], "c", NOON)[0]
         assert "+150" in format_alert(decision)      # 0.40 -> +150
 
-    def test_states_why_it_cleared_the_bar(self, engine):
-        decision = Alerter(engine.store).select([_arb()], "c", NOON)[0]
-        text = format_alert(decision)
-        assert "above the" in text and "bar" in text
+    def test_reads_like_a_plain_heads_up(self, engine):
+        """No box-drawing bars, no monospace label columns, no emoji."""
+        text = format_alert(Alerter(engine.store).select([_arb()], "c", NOON)[0])
+        for junk in ("━", "─", "<code>", "\U0001f6a8", "⚡"):
+            assert junk not in text
+        assert "/dailyedge" in text
 
-    def test_urgent_marked_differently(self, engine):
+    def test_urgent_flag_is_still_computed(self, engine):
         urgent = Alerter(engine.store).select([_arb()], "c", NOON)[0]
         assert urgent.urgent
-        assert "🚨" in format_alert(urgent)
 
 
 class TestEngineIntegration:

@@ -27,6 +27,10 @@ log = logging.getLogger(__name__)
 # Legs must settle together or it is timing risk, not arbitrage.
 MAX_RESOLUTION_SKEW_DAYS = 1.0
 
+# A genuine combinatorial arb captures a few percent at most. Anything above
+# this is a settled or dead market pricing outcomes at ~0, not reachable money.
+MAX_PLAUSIBLE_ARB_EDGE = 0.25
+
 
 class CombinatorialArb(Strategy):
     name = "combinatorial_arb"
@@ -143,6 +147,24 @@ class CombinatorialArb(Strategy):
             return None
         net_edge = net_profit / total_cost
         if net_edge < self.min_net_edge:
+            return None
+
+        # A real combinatorial arb buys the whole outcome space, worth ~$1, so
+        # its edge lives in low single digits and never exceeds ~20%. A larger
+        # number means the legs filled at settled or dead-market prices (a
+        # resolved game still listed at 0.002), which is not money you can
+        # actually capture. Reject it as a data artifact, exactly as the wallet
+        # screen rejects an impossible +60% edge. Without this the scanner
+        # reports "49895%" arbs and would fire nonsense alerts.
+        if net_edge > MAX_PLAUSIBLE_ARB_EDGE:
+            log.info("%s: implausible %.0f%% 'arb' - settled/dead market, "
+                     "rejected", event.title[:40], net_edge * 100)
+            return None
+        # Every leg priced near an extreme is the same tell at the leg level.
+        if all(leg.limit_price < 0.03 or leg.limit_price > 0.97
+               for leg in legs):
+            log.info("%s: all legs at price extremes - settled, rejected",
+                     event.title[:40])
             return None
 
         return Signal(

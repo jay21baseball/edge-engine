@@ -330,6 +330,44 @@ class PolymarketClient:
             ))
         return out
 
+    def recent_trades(self, address: str, limit: int = 40) -> list[dict]:
+        """Raw trade rows for a wallet, newest first — for whale tracking.
+
+        Returns plain dicts (not the WalletActivity dataclass) because the whale
+        alert needs the fields the screener throws away: the dollar amount, the
+        exact outcome bought, the market slug for a link, and the transaction
+        hash that lets us tell a new trade from one already alerted.
+        """
+        rows = request_json(f"{DATA}/activity", limiter=self.data_limiter,
+                            params={"user": address, "limit": limit})
+        out = []
+        for r in (rows or []):
+            if not isinstance(r, dict) or r.get("type") != "TRADE":
+                continue
+            out.append({
+                "hash": str(r.get("transactionHash") or ""),
+                "ts": int(safe_float(r.get("timestamp"))),
+                "side": str(r.get("side") or ""),
+                "usdc": safe_float(r.get("usdcSize")),
+                "price": safe_float(r.get("price")),
+                "size": safe_float(r.get("size")),
+                "outcome": str(r.get("outcome") or ""),
+                "title": str(r.get("title") or ""),
+                "slug": str(r.get("slug") or ""),
+            })
+        return out
+
+    def portfolio_value(self, address: str) -> Optional[float]:
+        """Current mark-to-market value of a wallet's open positions."""
+        try:
+            data = request_json(f"{DATA}/value", limiter=self.data_limiter,
+                               params={"user": address})
+        except Exception:
+            return None
+        if isinstance(data, list) and data:
+            return safe_float(data[0].get("value"))
+        return None
+
     def activity(self, address: str, limit: int = 500) -> list[WalletActivity]:
         rows = request_json(f"{DATA}/activity", limiter=self.data_limiter,
                             params={"user": address, "limit": limit})

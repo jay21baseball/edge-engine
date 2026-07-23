@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS bot_state (
     PRIMARY KEY (chat_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS whale_trades (
+    hash TEXT PRIMARY KEY, ts BIGINT, seen_ts TIMESTAMPTZ,
+    whale TEXT, address TEXT, side TEXT, usdc DOUBLE PRECISION,
+    price DOUBLE PRECISION, size DOUBLE PRECISION, outcome TEXT,
+    title TEXT, slug TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_whale_seen ON whale_trades(whale, seen_ts);
+
 CREATE TABLE IF NOT EXISTS live_divergence (
     id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, league TEXT, game TEXT,
     team TEXT, detail TEXT, espn_prob DOUBLE PRECISION,
@@ -151,6 +159,48 @@ class PostgresStore:
             cur.execute(
                 "DELETE FROM market_snapshots "
                 "WHERE ts < NOW() - (%s || ' days')::INTERVAL",
+                (str(keep_days),),
+            )
+            return max(cur.rowcount, 0)
+
+    # ---------------------------------------------------------------- whales
+
+    def log_whale_trades(self, whale: str, address: str,
+                         trades: list[dict]) -> int:
+        if not trades:
+            return 0
+        now = datetime.now(timezone.utc)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO whale_trades (hash, ts, seen_ts, whale, address,
+                       side, usdc, price, size, outcome, title, slug)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (hash) DO NOTHING""",
+                [(t["hash"], t["ts"], now, whale, address, t["side"],
+                  t["usdc"], t["price"], t["size"], t["outcome"],
+                  t["title"], t["slug"]) for t in trades],
+            )
+        return len(trades)
+
+    def recent_whale_trades(self, whale: Optional[str] = None,
+                            limit: int = 15) -> list[dict]:
+        cols = ("whale", "side", "usdc", "price", "outcome", "title", "ts")
+        with self.connect() as conn, conn.cursor() as cur:
+            if whale:
+                cur.execute(
+                    f"SELECT {', '.join(cols)} FROM whale_trades WHERE whale=%s "
+                    f"ORDER BY ts DESC LIMIT %s", (whale, limit))
+            else:
+                cur.execute(
+                    f"SELECT {', '.join(cols)} FROM whale_trades "
+                    f"ORDER BY ts DESC LIMIT %s", (limit,))
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def prune_whale_trades(self, keep_days: float = 30.0) -> int:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM whale_trades "
+                "WHERE seen_ts < NOW() - (%s || ' days')::INTERVAL",
                 (str(keep_days),),
             )
             return max(cur.rowcount, 0)

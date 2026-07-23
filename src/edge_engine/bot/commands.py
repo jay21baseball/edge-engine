@@ -458,6 +458,44 @@ def cmd_strategies(engine, chat_id, args, reply=None) -> str:
     ])
 
 
+def cmd_whales(engine, chat_id, args, reply=None) -> str:
+    """Who is being tracked, or one whale's recent trades if named."""
+    from ..whales.tracker import load_whales
+    whales = load_whales(engine.config)
+
+    if args:
+        name = args[0]
+        trades = engine.store.recent_whale_trades(whale=name.title(), limit=10)
+        if not trades:
+            trades = engine.store.recent_whale_trades(whale=name, limit=10)
+        if not trades:
+            return (f"No trades on file for {name} yet. The tracker records them "
+                    f"as they happen - if it just started, give it a bit.")
+        lines = [f"{trades[0]['whale']}'s last {len(trades)} trades:", ""]
+        from datetime import datetime, timezone
+        for t in trades:
+            verb = "bought" if t["side"].upper() == "BUY" else "sold"
+            mins = (datetime.now(timezone.utc).timestamp() - (t["ts"] or 0)) / 60
+            when = (f"{mins:.0f}m ago" if mins < 90
+                    else f"{mins / 60:.0f}h ago")
+            lines.append(f"{verb} ${t['usdc']:,.0f} of {t['outcome']} at "
+                         f"{t['price'] * 100:.0f}c  ({when})")
+        return "\n".join(lines)
+
+    if not whales:
+        return ("No whales set up yet. Add wallets to the whales list in "
+                "config.yaml and I'll track every trade they make.")
+    lines = [f"Tracking {len(whales)} wallet"
+             f"{'s' if len(whales) != 1 else ''}:", ""]
+    for w in whales:
+        floor = f" (over ${w.min_usdc:,.0f})" if w.min_usdc else ""
+        lines.append(f"{w.name}{floor} - {w.link}")
+    lines += ["", "Run the tracker with START WHALES.bat, then you'll get a "
+              "text every time one of them trades. Ask for one by name, like "
+              "/whale Tony, to see their recent moves."]
+    return "\n".join(lines)
+
+
 def cmd_live(engine, chat_id, args, reply=None) -> str:
     """Current live-game divergences: ESPN win probability vs Polymarket price."""
     gaps = engine.store.biggest_live_gaps(limit=8, since_hours=0.25)
@@ -803,48 +841,49 @@ def cmd_wallets(engine, chat_id, args, reply=None) -> str:
 
 
 HELP_TEXT = "\n".join([
-    "<b>FORGE</b>",
-    "<i>Prediction market edge · Kalshi + Polymarket</i>",
-    "━" * 22, "",
-    "<b>FIND PLAYS</b>",
-    "<code>/dailyedge</code>   best plays to enter today",
-    "<code>/weeklyedge</code>  the week's plan",
-    "<code>/all</code>         every open opportunity",
-    "<code>/whynot</code>      what got rejected, and why",
+    "Here's everything I can do. You can type these or just talk to me.",
     "",
-    "<b>BY CATEGORY</b>",
-    "<code>/tabs</code>        what is live in each tab",
-    "<code>/sports</code>  <code>/politics</code>  <code>/crypto</code>",
-    "<code>/economics</code>  <code>/weather</code>  <code>/tech</code>",
-    "<code>/geopolitics</code>  <code>/culture</code>  <code>/finance</code>",
+    "FINDING PLAYS",
+    "/dailyedge - best plays to enter today",
+    "/weeklyedge - the week's plan",
+    "/all - every open opportunity",
+    "/whynot - what I turned down, and why",
     "",
-    "<b>STRATEGY</b>",
-    "<code>/arb</code>         locked arbitrage only",
-    "<code>/live</code>        live-game divergences now",
-    "<code>/livestats</code>   is live edge real yet?",
-    "<code>/strategies</code>  what runs and why",
+    "BY SPORT OR TOPIC",
+    "/tabs - what's live in each one",
+    "/sports /politics /crypto /economics",
+    "/weather /tech /geopolitics /culture /finance",
     "",
-    "<b>ACT ON A PLAY</b>",
-    "<code>/explain 1</code>   full reasoning + counter-case",
-    "<code>/took 1 46</code>   logged as taken at 46¢",
-    "<code>/skip 1</code>      logged as passed",
-    "<code>/result 1 win</code>  settle it",
+    "STRATEGY",
+    "/arb - locked arbitrage only",
+    "/live - live-game gaps right now",
+    "/livestats - is live edge real yet?",
+    "/strategies - what I run and why",
     "",
-    "<b>TRACK</b>",
-    "<code>/review</code>     daily check: is this working?",
-    "<code>/pnl week</code>    which strategy is actually paying",
-    "<code>/scorecard</code>   record + calibration",
-    "<code>/status</code>      exposure, caps, breaker",
-    "<code>/wallets</code>     screened traders being followed",
+    "FOLLOWING THE WHALES",
+    "/whales - who I'm tracking",
+    "/whale Tony - Tony's recent trades",
     "",
-    "<b>SET UP</b>",
-    "<code>/bankroll 2500</code>  resize everything",
-    "<code>/watch cuba 40</code>  alert when it hits 40¢",
-    "<code>/help</code>        this list",
+    "WHEN YOU ACT",
+    "/took 1 46 - took play 1 at 46 cents",
+    "/skip 1 - passed on it",
+    "/explain 1 - the full read",
+    "/result 1 win - settle it",
     "",
-    "━" * 22,
-    "<i>Plain English works too — “daily edge”, “any plays”.</i>",
-    "<i>Nothing is ever traded for you.</i>",
+    "TRACKING",
+    "/review - quick daily check: is this working?",
+    "/pnl week - which strategy is actually paying",
+    "/scorecard - your record and calibration",
+    "/status - exposure, caps, circuit breaker",
+    "/wallets - the traders I've screened",
+    "",
+    "SETUP",
+    "/bankroll 2500 - resize everything",
+    "/watch cuba 40 - ping me when it hits 40 cents",
+    "/help - this list",
+    "",
+    "Plain English works too. Say 'daily edge' or 'any plays'.",
+    "I never place a bet for you - I just tell you what I see.",
 ])
 
 # Registered with Telegram so typing "/" shows a menu of these.
@@ -856,6 +895,7 @@ COMMAND_MENU = [
     ("review", "Daily check: is this working?"),
     ("live", "Live-game divergences right now"),
     ("livestats", "Is live edge real? (the verdict)"),
+    ("whales", "Who I'm tracking + their trades"),
     ("tabs", "What is live in each category"),
     ("sports", "Sports opportunities"),
     ("politics", "Politics opportunities"),
@@ -902,6 +942,7 @@ HANDLERS: dict[str, Callable] = {
     "tabs": cmd_tabs, "categories": cmd_tabs,
     "review": cmd_review, "check": cmd_review,
     "live": cmd_live, "livestats": cmd_livestats, "livereport": cmd_livestats,
+    "whales": cmd_whales, "whale": cmd_whales,
     "arb": cmd_arb, "arbitrage": cmd_arb,
     "strategies": cmd_strategies, "strategy": cmd_strategies,
 }

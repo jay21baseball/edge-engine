@@ -155,67 +155,73 @@ class TestBriefingConviction:
     def test_single_dominant_play_is_presented_alone(self, engine):
         signals = [_signal(0.20, 2, "Runaway"), _signal(0.02, 2, "Also-ran")]
         text = build_briefing(signals, self._state(engine), DAILY)
-        assert "THE PLAY" in text
+        assert "One play stands out" in text
         assert "Runaway" in text
         assert "Also-ran" not in text
 
     def test_comparable_plays_are_all_listed(self, engine):
         signals = [_signal(0.05, 2, "First"), _signal(0.045, 2, "Second")]
         text = build_briefing(signals, self._state(engine), DAILY)
-        assert "THE PLAY" not in text
+        assert "One play stands out" not in text
         assert "First" in text and "Second" in text
 
     def test_daily_excludes_long_dated_but_names_them(self, engine):
         """Long-dated edge is not hidden - it is named, counted, and deferred."""
         signals = [_signal(0.10, 200, "Election 2028")]
         text = build_briefing(signals, self._state(engine), DAILY)
-        assert "NO PLAY TODAY" in text
-        assert "1 opportunity" in text          # counted
-        assert "past this window" in text       # explained
-        assert "/weeklyedge or /all" in text    # where to find it
+        assert "Nothing worth a bet today" in text
+        assert " 1 out there" in text            # counted
+        assert "past this window" in text        # explained
+        assert "/weeklyedge or /all" in text     # where to find it
 
     def test_weekly_uses_its_own_wording(self, engine):
-        """The weekly view must not say TODAY or point back at itself."""
+        """The weekly view must speak of the week and not point back at itself."""
         text = build_briefing([_signal(0.10, 200, "X")],
                               self._state(engine), WEEKLY)
-        assert "NO PLAYS THIS WEEK" in text
-        assert "TODAY" not in text
+        assert "this week" in text
         assert "/weeklyedge" not in text
 
     def test_weekly_window_is_wider_than_daily(self, engine):
         assert WEEKLY.max_days > DAILY.max_days
         signals = [_signal(0.10, 8, "This week")]
-        assert "NO PLAY" in build_briefing(signals, self._state(engine), DAILY)
+        assert "Nothing worth a bet" in build_briefing(
+            signals, self._state(engine), DAILY)
         assert "This week" in build_briefing(signals, self._state(engine), WEEKLY)
 
     def test_advisory_shows_no_stake(self, engine):
         signals = [_signal(0.05, 2, "Research", advisory=True)]
         text = build_briefing(signals, self._state(engine), DAILY)
-        assert "NO STAKE" in text
-        assert "research only" in text.lower()
+        assert "Not sizing this one" in text
+        assert "research flag" in text.lower()
 
     def test_odds_are_rendered_in_american_format(self, engine):
         text = build_briefing([_signal(0.05, 2)], self._state(engine), DAILY)
         assert "+122" in text        # 0.45 -> +122
+
+    def test_reads_plainly_without_ai_furniture(self, engine):
+        """No box-drawing, no monospace columns, no emoji, no em-dashes."""
+        text = build_briefing([_signal(0.05, 2)], self._state(engine), DAILY)
+        for junk in ("━", "─", "<code>", "—", "\U0001f512"):
+            assert junk not in text
 
     def test_circuit_breaker_replaces_the_whole_briefing(self, engine):
         state = self._state(engine)
         state.week_start_bankroll = 2500
         state.current_bankroll = 2000
         text = build_briefing([_signal(0.20, 1)], state, DAILY)
-        assert "STAND DOWN" in text
-        assert "THE PLAY" not in text
+        assert "Sit this week out" in text
+        assert "One play stands out" not in text
 
     def test_empty_is_stated_as_correct_not_as_failure(self, engine):
         text = build_briefing([], self._state(engine), DAILY)
-        assert "NO PLAY TODAY" in text
-        assert "lowering its standards" in text
+        assert "Nothing worth a bet today" in text
+        assert "lowering" in text
 
     def test_total_at_risk_is_reported(self, engine):
         signals = [_signal(0.05, 2, "A"), _signal(0.048, 2, "B")]
         text = build_briefing(signals, self._state(engine), DAILY)
-        assert "AT RISK" in text
-        assert "of bankroll" in text
+        assert "at risk today" in text
+        assert "of your bankroll" in text
 
     def test_no_order_ticket_footer(self, engine):
         """That footer was removed - it repeated on every message."""
@@ -228,13 +234,13 @@ class TestPaperMode:
         """At $77 the unit is $3.85 - say what that means in dollars."""
         engine.set_bankroll("c", 77.0)
         text = build_briefing([], engine.state, DAILY)
-        assert "PAPER MODE" in text
+        assert "paper mode" in text.lower()
         assert "$3.85" in text
         assert "$0.19" in text          # a 5% edge on a $3.85 unit
 
     def test_workable_bankroll_has_no_notice(self, engine):
         engine.set_bankroll("c", 2500.0)
-        assert "PAPER MODE" not in build_briefing([], engine.state, DAILY)
+        assert "paper mode" not in build_briefing([], engine.state, DAILY).lower()
 
     def test_threshold_is_reported(self, engine):
         engine.set_bankroll("c", 77.0)
@@ -396,7 +402,7 @@ class TestPnl:
         engine.store.save_signal(_signal(0.05, 2.0, "A"))
         text = HANDLERS["pnl"](engine, "c", ["week"], None)
         assert "THIS WEEK" in text
-        assert "Locked arbitrage" in text      # friendly label, not the slug
+        assert "arbitrage" in text.lower()     # friendly label, not the slug
 
     def test_warns_while_the_sample_is_thin(self, engine):
         engine.store.save_signal(_signal(0.05, 2.0, "A"))

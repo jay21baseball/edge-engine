@@ -74,6 +74,30 @@ odds_sports:
   - baseball_mlb
   - soccer_usa_mls
 
+# ---------------------------------------------------------------- whales
+# Wallets to track. Every trade they make on Polymarket is public, so this
+# pulls each one the moment it lands and texts you what they did.
+#
+# Each whale can route to its OWN Telegram bot for a separate feed - create a
+# bot via @BotFather, then set bot_token and chat_id here. Leave them out and
+# all whales share one feed (whale_bot_token below, or the main bot).
+#
+#   name:      what to call them in the alert
+#   address:   their Polymarket wallet
+#   username:  their @handle, for the profile link (optional)
+#   min_usdc:  ignore trades smaller than this dollar amount (optional)
+whales:
+  - name: Tony
+    address: "0x204f72f35326db932158cba6adff0b9a1da95e14"
+    username: swisstony
+    min_usdc: 250
+
+# Shared bot for all whales that do not set their own. Leave null to use the
+# main bot. To give the whale feed its own bot: create one via @BotFather,
+# message it once, put its token here and your chat id below.
+whale_bot_token: null
+whale_chat_id: null
+
 # ------------------------------------------------------------- live recorder
 # Leagues ESPN publishes live win probability for. Soccer has none, so it is
 # not listed. Out-of-season leagues simply return no games and cost nothing.

@@ -170,6 +170,39 @@ class TestCombinatorialArb:
         thin = lambda m: _book(m.yes_ask, size=5.0, venue=Venue.POLYMARKET)
         assert CombinatorialArb().verify(candidate, thin, contracts=100) is None
 
+    def test_settled_market_implausible_arb_rejected(self):
+        """Resolved markets list outcomes at ~0.002, which reads as a 49000%
+        'arb'. It is not reachable money and must be rejected as an artifact."""
+        prices = [0.002, 0.002, 0.002]
+        markets = [Market(venue=Venue.POLYMARKET, market_id=f"c{i}", event_id="G",
+                          title=f"c{i}", category="sports", yes_ask=p,
+                          no_ask=round(1 - p, 4), close_ts=SOON, fee_rate=0.0)
+                   for i, p in enumerate(prices)]
+        ev = Event(venue=Venue.POLYMARKET, event_id="G", title="Settled game",
+                   category="sports", neg_risk=True, markets=markets)
+        candidate = CombinatorialArb().screen(ev)
+        assert candidate is not None            # passes the naive gross check
+        sig = CombinatorialArb().verify(
+            candidate, lambda m: _book(m.yes_ask, venue=Venue.POLYMARKET),
+            contracts=100)
+        assert sig is None, "a 49000% 'arb' on settled prices must be rejected"
+
+    def test_genuine_small_arb_still_accepted(self):
+        """The guard must not reject a real low-single-digit arb."""
+        prices = [0.30, 0.30, 0.32]            # sum 0.92 -> ~8% gross
+        markets = [Market(venue=Venue.POLYMARKET, market_id=f"c{i}", event_id="G",
+                          title=f"c{i}", category="geopolitics", yes_ask=p,
+                          no_ask=round(1 - p, 4), close_ts=SOON, fee_rate=0.0)
+                   for i, p in enumerate(prices)]
+        ev = Event(venue=Venue.POLYMARKET, event_id="G", title="Real",
+                   category="geopolitics", neg_risk=True, markets=markets)
+        candidate = CombinatorialArb().screen(ev)
+        sig = CombinatorialArb(min_net_edge=0.005).verify(
+            candidate, lambda m: _book(m.yes_ask, venue=Venue.POLYMARKET),
+            contracts=100)
+        assert sig is not None
+        assert 0.0 < sig.edge < 0.25
+
     def test_phantom_arb_at_top_of_book_dies_on_the_walk(self):
         """Quoted price implies an arb; real depth exists only for 2 contracts."""
         markets = [Market(venue=Venue.POLYMARKET, market_id=f"c{i}", event_id="G",

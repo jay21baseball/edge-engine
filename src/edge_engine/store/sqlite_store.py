@@ -72,6 +72,13 @@ CREATE TABLE IF NOT EXISTS bot_state (
     PRIMARY KEY (chat_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS whale_trades (
+    hash TEXT PRIMARY KEY, ts INTEGER, seen_ts TEXT,
+    whale TEXT, address TEXT, side TEXT, usdc REAL, price REAL,
+    size REAL, outcome TEXT, title TEXT, slug TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_whale_seen ON whale_trades(whale, seen_ts);
+
 CREATE TABLE IF NOT EXISTS live_divergence (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT, league TEXT, game TEXT, team TEXT, detail TEXT,
@@ -137,6 +144,52 @@ class SqliteStore:
             if previous is None or previous != current:
                 changed.append(m)
         return changed
+
+    # ---------------------------------------------------------------- whales
+
+    def log_whale_trades(self, whale: str, address: str,
+                         trades: list[dict]) -> int:
+        if not trades:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT OR IGNORE INTO whale_trades
+                   (hash, ts, seen_ts, whale, address, side, usdc, price,
+                    size, outcome, title, slug)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(t["hash"], t["ts"], now, whale, address, t["side"],
+                  t["usdc"], t["price"], t["size"], t["outcome"],
+                  t["title"], t["slug"]) for t in trades],
+            )
+        return len(trades)
+
+    def recent_whale_trades(self, whale: Optional[str] = None,
+                            limit: int = 15) -> list[dict]:
+        with self.connect() as conn:
+            if whale:
+                rows = conn.execute(
+                    """SELECT whale, side, usdc, price, outcome, title, ts
+                       FROM whale_trades WHERE whale = ?
+                       ORDER BY ts DESC LIMIT ?""",
+                    (whale, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT whale, side, usdc, price, outcome, title, ts
+                       FROM whale_trades ORDER BY ts DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+        cols = ("whale", "side", "usdc", "price", "outcome", "title", "ts")
+        return [dict(zip(cols, r)) for r in rows]
+
+    def prune_whale_trades(self, keep_days: float = 30.0) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM whale_trades WHERE seen_ts < datetime('now', ?)",
+                (f"-{keep_days} days",),
+            )
+        return max(cur.rowcount, 0)
 
     # ------------------------------------------------------------------ live
 

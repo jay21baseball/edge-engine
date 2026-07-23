@@ -468,6 +468,74 @@ class Engine:
         return {"scores": scores, "positions": positions_by_wallet,
                 "qualified": qualified, "market_makers": mm}
 
+    # ---------------------------------------------------------------- whales
+
+    def watch_whales(self, interval: int = 45) -> None:
+        """Poll every tracked wallet's trades and alert on new ones.
+
+        Each whale can route to its own Telegram bot (a dedicated feed), and
+        falls back to a shared whale bot, then the main bot. Free - it only
+        reads Polymarket's public activity feed.
+        """
+        from .whales.tracker import WhaleTracker, load_whales
+
+        whales = load_whales(self.config)
+        if not whales:
+            log.warning("no whales configured - add them to config.yaml")
+            return
+        tracker = WhaleTracker(self.poly, self.store)
+        main_token = self.config.get("telegram_bot_token")
+        main_chat = self.config.get("telegram_chat_id")
+        shared_token = self.config.get("whale_bot_token") or main_token
+        shared_chat = self.config.get("whale_chat_id") or main_chat
+
+        # Prime once so a restart does not replay history as fresh alerts.
+        for w in whales:
+            tracker.check(w, prime=True)
+        log.info("whale tracker: %d wallets, every %ds. ctrl-c to stop.",
+                 len(whales), interval)
+
+        pruned = 0.0
+        while True:
+            try:
+                for w in whales:
+                    alerts = tracker.check(w)
+                    if not alerts:
+                        continue
+                    token = w.bot_token or shared_token
+                    chat = w.chat_id or shared_chat
+                    for text in alerts:
+                        self._send_to(token, chat, text)
+                    log.info("whale %s: %d new trade(s) alerted",
+                             w.name, len(alerts))
+                if time.monotonic() - pruned > 3600:
+                    self.store.prune_whale_trades(keep_days=30)
+                    pruned = time.monotonic()
+            except KeyboardInterrupt:
+                log.info("whale tracker stopped")
+                return
+            except Exception as e:
+                log.error("whale poll failed, continuing: %s", e)
+            time.sleep(interval)
+
+    def _send_to(self, token, chat_id, text: str) -> None:
+        """Send one message to a specific bot/chat, plain text."""
+        import urllib.parse
+        from .ingest.http import request_json
+        if not token or not chat_id:
+            print(text)
+            return
+        try:
+            request_json(
+                f"https://api.telegram.org/bot{token}/sendMessage"
+                f"?chat_id={urllib.parse.quote(str(chat_id))}"
+                f"&disable_web_page_preview=true"
+                f"&text={urllib.parse.quote(text[:4000])}"
+            )
+        except Exception as e:
+            log.error("whale send failed: %s", e)
+            print(text)
+
     # ------------------------------------------------------------------ live
 
     def record_live_once(self, leagues: list[str]) -> int:
@@ -647,7 +715,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="edge-engine")
     parser.add_argument("command",
                         choices=["scan", "watch", "wallets", "status", "sports",
-                                 "signals", "bot", "live", "livestats"])
+                                 "signals", "bot", "live", "livestats",
+                                 "whales"])
     parser.add_argument("--interval", type=int, default=60,
                         help="live: seconds between polls")
     parser.add_argument("--all", action="store_true",
@@ -693,6 +762,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print("not enough movement recorded yet")
             return 0
         engine.watch_live(leagues, interval=args.interval)
+        return 0
+
+    if args.command == "whales":
+        engine.watch_whales(interval=max(args.interval, 20))
         return 0
 
     if args.command == "bot":

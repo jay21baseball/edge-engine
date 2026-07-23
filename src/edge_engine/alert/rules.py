@@ -184,29 +184,31 @@ class Alerter:
 
 
 def format_alert(decision: AlertDecision) -> str:
-    """A push notification. Short enough to read on a lock screen."""
+    """A push worth interrupting for, written plainly like a quick heads-up."""
     from .format import american_str, cents, horizon, money
 
     signal = decision.signal
-    siren = "🚨" if decision.urgent else "⚡"
-    kind = "LOCKED ARB" if signal.deterministic else "HIGH EDGE"
+    opener = ("Locked arb just showed up." if signal.deterministic
+              else "Something big just cleared the bar.")
 
     lines = [
-        f"{siren} <b>{kind}</b>",
-        f"<b>{signal.title[:70]}</b>",
-        "─" * 22,
-        f"<code>VENUE      {signal.venue.value.title()}</code>",
-        f"<code>ACTION     {signal.side.replace('_', ' ').upper()}</code>",
-        f"<code>PRICE      {american_str(signal.entry_price)} "
-        f"({cents(signal.entry_price)})</code>",
-        f"<code>EDGE       {signal.edge * 100:+.2f}%</code>",
-        f"<code>RESOLVES   {horizon(signal.days_to_resolution)}</code>",
+        opener, "",
+        signal.title[:75], "",
     ]
+    act = signal.side.replace("_", " ").upper()
+    if signal.deterministic:
+        lines.append(f"Buy {act} on {signal.venue.value.title()}. "
+                     f"Guaranteed {signal.edge * 100:+.1f}%, no guessing.")
+    else:
+        lines.append(f"Bet {act} on {signal.venue.value.title()} at "
+                     f"{american_str(signal.entry_price)} "
+                     f"({cents(signal.entry_price)}). About "
+                     f"{signal.edge * 100:+.1f}% of edge.")
     if signal.stake:
-        lines.append(f"<code>STAKE      {money(signal.stake)}</code>")
+        lines.append(f"Size it around {money(signal.stake)}.")
+    lines.append(f"Settles {horizon(signal.days_to_resolution)}.")
 
-    lines += ["", f"<i>{decision.reason}</i>"]
     if signal.counter_case:
-        lines += ["", f"<b>AGAINST</b> <i>{signal.counter_case[:200]}</i>"]
-    lines += ["", "<code>/dailyedge</code> for the full picture"]
+        lines += ["", f"The catch: {signal.counter_case[:180]}"]
+    lines += ["", "Hit /dailyedge for the full read."]
     return "\n".join(lines)
