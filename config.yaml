@@ -74,6 +74,15 @@ odds_sports:
   - baseball_mlb
   - soccer_usa_mls
 
+# ------------------------------------------------------------- live recorder
+# Leagues ESPN publishes live win probability for. Soccer has none, so it is
+# not listed. Out-of-season leagues simply return no games and cost nothing.
+live_leagues:
+  - mlb
+  - wnba
+  - nba
+  - nfl
+
 # ---------------------------------------------------------------- storage
 # Leave null for local SQLite. Set to a Supabase connection string (or supply
 # DATABASE_URL in the environment) to run in the cloud with your PC off.

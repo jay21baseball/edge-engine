@@ -458,6 +458,76 @@ def cmd_strategies(engine, chat_id, args, reply=None) -> str:
     ])
 
 
+def cmd_live(engine, chat_id, args, reply=None) -> str:
+    """Current live-game divergences: ESPN win probability vs Polymarket price."""
+    gaps = engine.store.biggest_live_gaps(limit=8, since_hours=0.25)
+    if not gaps:
+        return "\n".join([
+            "<b>LIVE</b>", "-" * 22, "",
+            "No live divergences recorded in the last 15 minutes.", "",
+            "<i>The live recorder runs as its own process (it polls every "
+            "60s during games). If it is not running, start it with "
+            "<b>START LIVE.bat</b> - or there are simply no games live right "
+            "now.</i>",
+        ])
+    lines = ["<b>LIVE DIVERGENCE</b>",
+             "<i>ESPN model vs Polymarket price, right now.</i>", "-" * 22, ""]
+    for g in gaps:
+        side = "BUY YES" if g["gap"] > 0 else "BUY NO"
+        lines += [
+            f"<b>{g['team'][:24]}</b>  <i>{g['detail']}</i>",
+            f"<code>ESPN {g['espn_prob'] * 100:.0f}%  vs  POLY "
+            f"{g['poly_price'] * 100:.0f}%   net {g['net_gap'] * 100:+.1f}pt "
+            f"{side}</code>", "",
+        ]
+    lines += ["<i>RECORDING ONLY - not yet a trade signal. It is proving "
+              "whether these gaps are real and reachable before it alerts on "
+              "them. <code>/livestats</code> for the verdict so far.</i>"]
+    return "\n".join(lines)
+
+
+def cmd_livestats(engine, chat_id, args, reply=None) -> str:
+    """The verdict the recorder exists to reach: is live edge real and reachable?"""
+    s = engine.store.live_summary(since_hours=24 * 30)
+    if s["observations"] == 0:
+        return ("<b>LIVE STATS</b>\n\nNothing recorded yet. Start the live "
+                "recorder (<b>START LIVE.bat</b>) during a slate of games.")
+    lines = [
+        "<b>LIVE STATS</b>",
+        "<i>Free ESPN model vs Polymarket, recorded.</i>", "-" * 22,
+        f"<code>OBSERVATIONS  {s['observations']:,}</code>",
+        f"<code>GAMES         {s['games']}</code>",
+        f"<code>AVG GAP       {s['avg_gap'] * 100:.1f}pts</code>",
+        f"<code>MAX GAP       {s['max_gap'] * 100:.1f}pts</code>",
+        f"<code>NET+ AFTER FEE {s['pct_net_positive'] * 100:.0f}%</code>",
+        "",
+    ]
+    if s["moves"] >= 20:
+        el, pl = s["espn_led"], s["poly_led"]
+        if el > pl * 1.3:
+            verdict = ("<b>ESPN leads.</b> The model repositions before "
+                       "Polymarket - which is the whole thesis. If gaps also "
+                       "persist long enough to act, live is worth building an "
+                       "alerter on.")
+        elif pl > el * 1.3:
+            verdict = ("<b>Polymarket leads.</b> This inverts the thesis - "
+                       "the market moves first, so trading toward ESPN would be "
+                       "trading into stale information. Live is NOT the edge "
+                       "here, and it is worth knowing before risking a cent.")
+        else:
+            verdict = ("<b>No clear lead.</b> The two move together. That means "
+                       "no exploitable lag - the honest answer, arrived at for "
+                       "free.")
+        lines += [verdict, "",
+                  f"<i>ESPN moved first {el}, Polymarket first {pl}, "
+                  f"of {s['moves']} tracked moves.</i>"]
+    else:
+        lines.append(f"<i>Only {s['moves']} tracked moves so far - need ~20 "
+                     f"before the lead/lag verdict means anything. Keep the "
+                     f"recorder running through a few slates.</i>")
+    return "\n".join(lines)
+
+
 def cmd_review(engine, chat_id, args, reply=None) -> str:
     """The daily five-minute check: is this working, and what should change?
 
@@ -750,6 +820,8 @@ HELP_TEXT = "\n".join([
     "",
     "<b>STRATEGY</b>",
     "<code>/arb</code>         locked arbitrage only",
+    "<code>/live</code>        live-game divergences now",
+    "<code>/livestats</code>   is live edge real yet?",
     "<code>/strategies</code>  what runs and why",
     "",
     "<b>ACT ON A PLAY</b>",
@@ -782,6 +854,8 @@ COMMAND_MENU = [
     ("all", "Every open opportunity"),
     ("whynot", "What got rejected, and why"),
     ("review", "Daily check: is this working?"),
+    ("live", "Live-game divergences right now"),
+    ("livestats", "Is live edge real? (the verdict)"),
     ("tabs", "What is live in each category"),
     ("sports", "Sports opportunities"),
     ("politics", "Politics opportunities"),
@@ -827,6 +901,7 @@ HANDLERS: dict[str, Callable] = {
     "watch": cmd_watch, "watchlist": cmd_watch,
     "tabs": cmd_tabs, "categories": cmd_tabs,
     "review": cmd_review, "check": cmd_review,
+    "live": cmd_live, "livestats": cmd_livestats, "livereport": cmd_livestats,
     "arb": cmd_arb, "arbitrage": cmd_arb,
     "strategies": cmd_strategies, "strategy": cmd_strategies,
 }

@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS bot_state (
     PRIMARY KEY (chat_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS live_divergence (
+    id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, league TEXT, game TEXT,
+    team TEXT, detail TEXT, espn_prob DOUBLE PRECISION,
+    poly_price DOUBLE PRECISION, gap DOUBLE PRECISION,
+    net_gap DOUBLE PRECISION, espn_delta DOUBLE PRECISION,
+    poly_delta DOUBLE PRECISION, market_id TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_live_ts ON live_divergence(ts);
+
 CREATE TABLE IF NOT EXISTS cross_venue_log (
     id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, kalshi_id TEXT, poly_id TEXT,
     title TEXT, gross_spread DOUBLE PRECISION, net_after_fees DOUBLE PRECISION,
@@ -141,6 +150,86 @@ class PostgresStore:
         with self.connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM market_snapshots "
+                "WHERE ts < NOW() - (%s || ' days')::INTERVAL",
+                (str(keep_days),),
+            )
+            return max(cur.rowcount, 0)
+
+    # ------------------------------------------------------------------ live
+
+    def last_live_prices(self, market_ids: list[str]) -> dict[str, tuple]:
+        if not market_ids:
+            return {}
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT ON (market_id) market_id, espn_prob, poly_price
+                   FROM live_divergence WHERE market_id = ANY(%s)
+                   ORDER BY market_id, ts DESC""",
+                (list(market_ids),),
+            )
+            return {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+
+    def log_live(self, records: list[dict]) -> int:
+        if not records:
+            return 0
+        now = datetime.now(timezone.utc)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO live_divergence (ts, league, game, team, detail,
+                       espn_prob, poly_price, gap, net_gap, espn_delta,
+                       poly_delta, market_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                [(now, r["league"], r["game"], r["team"], r["detail"],
+                  r["espn_prob"], r["poly_price"], r["gap"], r["net_gap"],
+                  r["espn_delta"], r["poly_delta"], r["market_id"])
+                 for r in records],
+            )
+        return len(records)
+
+    def live_summary(self, since_hours: float = 168.0) -> dict:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT COUNT(*), COUNT(DISTINCT game), AVG(ABS(gap)),
+                          MAX(ABS(gap)),
+                          AVG(CASE WHEN net_gap > 0 THEN 1.0 ELSE 0.0 END),
+                          SUM(CASE WHEN ABS(espn_delta) > ABS(poly_delta)
+                                   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN ABS(poly_delta) > ABS(espn_delta)
+                                   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN ABS(espn_delta) > 0.001
+                                    OR ABS(poly_delta) > 0.001 THEN 1 ELSE 0 END)
+                   FROM live_divergence
+                   WHERE ts > NOW() - (%s || ' hours')::INTERVAL""",
+                (str(since_hours),),
+            )
+            r = cur.fetchone()
+        return {
+            "observations": r[0] or 0, "games": r[1] or 0,
+            "avg_gap": r[2] or 0.0, "max_gap": r[3] or 0.0,
+            "pct_net_positive": r[4] or 0.0,
+            "espn_led": r[5] or 0, "poly_led": r[6] or 0, "moves": r[7] or 0,
+        }
+
+    def biggest_live_gaps(self, limit: int = 8, since_hours: float = 1.0
+                          ) -> list[dict]:
+        cols = ("game", "team", "detail", "espn_prob", "poly_price",
+                "gap", "net_gap", "ts")
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT {', '.join(cols)} FROM (
+                        SELECT DISTINCT ON (market_id) {', '.join(cols)}, market_id
+                        FROM live_divergence
+                        WHERE ts > NOW() - (%s || ' hours')::INTERVAL
+                        ORDER BY market_id, ts DESC
+                    ) latest ORDER BY ABS(net_gap) DESC LIMIT %s""",
+                (str(since_hours), limit),
+            )
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def prune_live(self, keep_days: float = 30.0) -> int:
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM live_divergence "
                 "WHERE ts < NOW() - (%s || ' days')::INTERVAL",
                 (str(keep_days),),
             )

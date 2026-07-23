@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS bot_state (
     PRIMARY KEY (chat_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS live_divergence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT, league TEXT, game TEXT, team TEXT, detail TEXT,
+    espn_prob REAL, poly_price REAL, gap REAL, net_gap REAL,
+    espn_delta REAL, poly_delta REAL, market_id TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_live_ts ON live_divergence(ts);
+CREATE INDEX IF NOT EXISTS ix_live_game ON live_divergence(game, ts);
+
 CREATE TABLE IF NOT EXISTS cross_venue_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT, kalshi_id TEXT, poly_id TEXT, title TEXT,
@@ -128,6 +137,100 @@ class SqliteStore:
             if previous is None or previous != current:
                 changed.append(m)
         return changed
+
+    # ------------------------------------------------------------------ live
+
+    def last_live_prices(self, market_ids: list[str]) -> dict[str, tuple]:
+        """Most recent (espn_prob, poly_price) per market, for delta/lead-lag."""
+        if not market_ids:
+            return {}
+        marks = ",".join("?" * len(market_ids))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT market_id, espn_prob, poly_price FROM live_divergence
+                    WHERE id IN (SELECT MAX(id) FROM live_divergence
+                                 WHERE market_id IN ({marks}) GROUP BY market_id)""",
+                market_ids,
+            ).fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
+
+    def log_live(self, records: list[dict]) -> int:
+        """Append divergence observations. Records carry precomputed deltas."""
+        if not records:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT INTO live_divergence
+                       (ts, league, game, team, detail, espn_prob, poly_price,
+                        gap, net_gap, espn_delta, poly_delta, market_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(now, r["league"], r["game"], r["team"], r["detail"],
+                  r["espn_prob"], r["poly_price"], r["gap"], r["net_gap"],
+                  r["espn_delta"], r["poly_delta"], r["market_id"])
+                 for r in records],
+            )
+        return len(records)
+
+    def live_summary(self, since_hours: float = 168.0) -> dict:
+        """Aggregate the recorded divergence: is there a lead, and gaps that last?"""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*), COUNT(DISTINCT game),
+                          AVG(ABS(gap)), MAX(ABS(gap)),
+                          AVG(CASE WHEN net_gap > 0 THEN 1.0 ELSE 0.0 END)
+                   FROM live_divergence WHERE ts > datetime('now', ?)""",
+                (f"-{since_hours} hours",),
+            ).fetchone()
+            # Lead attribution: on observations where the gap widened, which
+            # side moved? If ESPN moved and Polymarket did not, ESPN led.
+            lead = conn.execute(
+                """SELECT
+                     SUM(CASE WHEN ABS(espn_delta) > ABS(poly_delta)
+                              THEN 1 ELSE 0 END) AS espn_led,
+                     SUM(CASE WHEN ABS(poly_delta) > ABS(espn_delta)
+                              THEN 1 ELSE 0 END) AS poly_led,
+                     COUNT(*) AS moves
+                   FROM live_divergence
+                   WHERE ts > datetime('now', ?)
+                     AND (ABS(espn_delta) > 0.001 OR ABS(poly_delta) > 0.001)""",
+                (f"-{since_hours} hours",),
+            ).fetchone()
+        return {
+            "observations": row[0] or 0,
+            "games": row[1] or 0,
+            "avg_gap": row[2] or 0.0,
+            "max_gap": row[3] or 0.0,
+            "pct_net_positive": row[4] or 0.0,
+            "espn_led": lead[0] or 0,
+            "poly_led": lead[1] or 0,
+            "moves": lead[2] or 0,
+        }
+
+    def biggest_live_gaps(self, limit: int = 8, since_hours: float = 1.0
+                          ) -> list[dict]:
+        """Latest observation per market, ranked by gap. One row per game side,
+        not one per poll - otherwise the same market repeats down the list."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT game, team, detail, espn_prob, poly_price, gap, net_gap, ts
+                   FROM live_divergence
+                   WHERE id IN (SELECT MAX(id) FROM live_divergence
+                                WHERE ts > datetime('now', ?) GROUP BY market_id)
+                   ORDER BY ABS(net_gap) DESC LIMIT ?""",
+                (f"-{since_hours} hours", limit),
+            ).fetchall()
+        cols = ("game", "team", "detail", "espn_prob", "poly_price",
+                "gap", "net_gap", "ts")
+        return [dict(zip(cols, r)) for r in rows]
+
+    def prune_live(self, keep_days: float = 30.0) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM live_divergence WHERE ts < datetime('now', ?)",
+                (f"-{keep_days} days",),
+            )
+        return max(cur.rowcount, 0)
 
     def prune_snapshots(self, keep_days: float = 90.0) -> int:
         """Drop snapshots older than the retention window."""

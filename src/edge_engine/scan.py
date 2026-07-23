@@ -468,6 +468,86 @@ class Engine:
         return {"scores": scores, "positions": positions_by_wallet,
                 "qualified": qualified, "market_makers": mm}
 
+    # ------------------------------------------------------------------ live
+
+    def record_live_once(self, leagues: list[str]) -> int:
+        """One live poll: match ESPN games to Polymarket, log divergence.
+
+        Returns the number of divergence rows written. Records only pairings
+        whose gap clears the noise floor, and attaches per-market deltas so the
+        stored series can later answer which venue leads.
+        """
+        from .ingest.espn import EspnClient
+        from .strategies.live_recorder import (
+            MIN_GAP_TO_LOG,
+            build_pairings,
+        )
+
+        espn = getattr(self, "_espn", None)
+        if espn is None:
+            espn = self._espn = EspnClient()
+
+        games = espn.live_games(leagues)
+        if not games:
+            return 0
+
+        # Only need Polymarket sports events for matching; fetch once per poll.
+        try:
+            events = [e for e in self.poly.events(limit=400, closed=False)
+                      if "sport" in (e.category or "").lower()]
+        except Exception as e:
+            log.error("live: polymarket fetch failed: %s", e)
+            return 0
+
+        pairings = build_pairings(games, events)
+        if not pairings:
+            log.info("live: %d games in progress, no Polymarket match yet",
+                     len(games))
+            return 0
+
+        previous = self.store.last_live_prices(
+            [p.market.market_id for p in pairings])
+        records = []
+        for p in pairings:
+            if p.net_gap < MIN_GAP_TO_LOG - 1.0:  # keep even small/negative
+                pass
+            prev = previous.get(p.market.market_id)
+            espn_delta = (p.espn_prob - prev[0]) if prev else 0.0
+            poly_delta = (p.poly_price - prev[1]) if prev else 0.0
+            records.append({
+                "league": p.game.league,
+                "game": f"{p.game.away_team} @ {p.game.home_team}",
+                "team": p.team, "detail": p.game.detail,
+                "espn_prob": round(p.espn_prob, 4),
+                "poly_price": round(p.poly_price, 4),
+                "gap": round(p.gap, 4), "net_gap": round(p.net_gap, 4),
+                "espn_delta": round(espn_delta, 4),
+                "poly_delta": round(poly_delta, 4),
+                "market_id": p.market.market_id,
+            })
+        written = self.store.log_live(records)
+        log.info("live: %d games, %d pairings, %d logged",
+                 len(games), len(pairings), written)
+        return written
+
+    def watch_live(self, leagues: list[str], interval: int = 60) -> None:
+        """Continuous live recorder. Free — polls ESPN and Polymarket only."""
+        log.info("live recorder: leagues=%s, every %ds. ctrl-c to stop.",
+                 ",".join(leagues), interval)
+        pruned_at = 0.0
+        while True:
+            try:
+                self.record_live_once(leagues)
+                if time.monotonic() - pruned_at > 3600:
+                    self.store.prune_live(keep_days=30)
+                    pruned_at = time.monotonic()
+            except KeyboardInterrupt:
+                log.info("live recorder stopped")
+                return
+            except Exception as e:
+                log.error("live poll failed, continuing: %s", e)
+            time.sleep(interval)
+
     def push_alerts(self, signals: list[Signal], events=None) -> int:
         """Push anything good enough to interrupt for. Returns how many fired.
 
@@ -567,7 +647,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="edge-engine")
     parser.add_argument("command",
                         choices=["scan", "watch", "wallets", "status", "sports",
-                                 "signals", "bot"])
+                                 "signals", "bot", "live", "livestats"])
+    parser.add_argument("--interval", type=int, default=60,
+                        help="live: seconds between polls")
     parser.add_argument("--all", action="store_true",
                         help="sports: include out-of-season leagues")
     parser.add_argument("--config", default="config.yaml")
@@ -590,6 +672,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             mark = "ON " if engine.bankroll.strategy_enabled(name) else "OFF"
             print(f"  [{mark}] {name:<22} (needs ${gate:,.0f})")
         print(f"\nstored rows: {engine.store.counts()}")
+        return 0
+
+    if args.command in ("live", "livestats"):
+        leagues = engine.config.get("live_leagues") or ["mlb", "wnba", "nba",
+                                                        "nfl"]
+        if args.command == "livestats":
+            s = engine.store.live_summary()
+            print(f"observations: {s['observations']:,}   games: {s['games']}")
+            print(f"avg gap: {s['avg_gap'] * 100:.1f}pts   "
+                  f"max gap: {s['max_gap'] * 100:.1f}pts")
+            print(f"net-positive after fees: {s['pct_net_positive'] * 100:.0f}%")
+            if s["moves"]:
+                el, pl = s["espn_led"], s["poly_led"]
+                lead = ("ESPN leads" if el > pl * 1.3 else
+                        "Polymarket leads" if pl > el * 1.3 else "no clear lead")
+                print(f"lead: {lead}  (ESPN moved first {el}, "
+                      f"Polymarket first {pl}, of {s['moves']} moves)")
+            else:
+                print("not enough movement recorded yet")
+            return 0
+        engine.watch_live(leagues, interval=args.interval)
         return 0
 
     if args.command == "bot":
